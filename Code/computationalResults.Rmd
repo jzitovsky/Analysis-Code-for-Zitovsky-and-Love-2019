@@ -1,0 +1,1009 @@
+---
+title: "Estimation_Performance"
+author: "Josh Zitovsky"
+date: "5/10/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+$$
+\newcommand{\Cov}[1]{\operatorname{Cov}\left(#1\right)}
+
+\newcommand{\Var}[1]{\operatorname{Var}\left(#1\right)}
+
+\newcommand{\Sumn}[0]{\sum_{i=1}^n}
+
+\newcommand{\Summ}[0]{\sum_{i=1}^m}
+
+\newcommand{\Prodn}[0]{\prod_{i=1}^n}
+
+\newcommand{\Prodm}[0]{\prod_{i=1}^m}
+
+\newcommand{\MLE}[1]{\widehat{#1}_\text{MLE}}
+
+\newcommand{\MME}[1]{\widehat{#1}_\text{MME}}
+
+\newcommand{\P}[1]{P\left(#1\right)}
+
+\newcommand{\by}[0]{\mathbf{y}}
+
+\newcommand{\bp}[0]{\mathbf{p}}
+
+\newcommand{\bn}[0]{\mathbf{n}}
+
+\newcommand{\bY}[0]{\mathbf{Y}}
+
+\newcommand{\bx}[0]{\mathbf{x}}
+
+\newcommand{\bX}[0]{\mathbf{X}}
+
+\newcommand{\bbeta}[0]{\boldsymbol{\beta}}
+
+\newcommand{\bphi}[0]{\boldsymbol{\phi}}
+
+\newcommand{\iid}[0]{\overset{iid}\sim}
+
+\newcommand{\Exp}[1]{\text{Exp}\left(#1\right)}
+
+\newcommand{\Pois}[1]{\text{Poisson}\left(#1\right)}
+
+\newcommand{\Bin}[1]{\text{Binomial}\left(#1\right)}
+
+\newcommand{\Bern}[1]{\text{Bernulli}\left(#1\right)}
+
+\newcommand{\Gamd}[1]{\text{Gamma}\left(#1\right)}
+
+\newcommand{\Betad}[1]{\text{Beta}\left(#1\right)}
+
+\newcommand{\Geo}[1]{\text{Geometric}\left(#1\right)}
+
+\newcommand{\set}[1]{\left\{#1\right\}}
+$$
+
+
+```{r setup, echo=F, results='hide', warning=FALSE, message=FALSE}
+###SET-UP###
+
+#tweaking options
+options(max.print = 1000)
+
+#loading libraries
+library(airway)
+library(DESeq2)
+library(apeglm)
+library(ashr)
+library(VGAM)
+library(aod)
+library(gamlss)
+library(aods3)
+library(tidyverse)
+library(microbenchmark)
+library(dichromat)
+
+#function to supress and count warnings
+countWarnings <- function(expr) 
+{
+    .number_of_warnings <- 0L
+    frame_number <- sys.nframe()
+    ans <- withCallingHandlers(expr, warning = function(w) 
+    {
+      assign(".number_of_warnings", .number_of_warnings + 1L, 
+        envir = sys.frame(frame_number))
+      invokeRestart("muffleWarning")
+    })
+    message(paste("No. of warnings thrown:", .number_of_warnings))
+    ans
+}
+
+#custom beta-binomial log-likelihood function
+betabinom.log.lik <- function(y, x, beta, param, offset) {
+  xbeta <- x %*% beta
+  p.hat <- (1+exp(-xbeta))^-1
+  dbetabinom(y, prob=p.hat, size=param[-1], theta=param[1], log=TRUE)
+}
+
+#function which parittions the data into a number of groups (input), calculates apeglm estimates for the groups with C++, and outputs elapse time for MLE, overdispersion and apeglm estimation
+partitionDataC = function(groups, n=100, tolerance=1e-14) {
+  set.seed(1)
+  mleTimes = vector("double", length(groups))
+  totalTimes = vector("double", length(groups))
+  mapTimes = vector("double", length(groups))
+  for (i in 1:length(groups)) {
+    f = factor(rep(1:groups[i], ceiling(n/groups[i])))[1:100]
+    x = model.matrix(~f)
+    theta.hat.0 = 100
+    param <- cbind(theta.hat.0, cts)
+    totalTimes[i] = system.time({
+      fit.mle <- apeglm(Y=ase.cts, x=x, log.lik=NULL, param=param, no.shrink=TRUE, log.link=FALSE, method = "betabinC")
+      theta.hat <- bbEstDisp(success=ase.cts, size=cts, x=x, beta=fit.mle$map, minDisp=1, maxDisp=500)
+      param = cbind(theta.hat, cts)
+      mleTimes[i] = system.time({fit.mle <- apeglm(Y=ase.cts, x=x, log.lik=NULL, param=param, no.shrink=TRUE, log.link=FALSE, method = "betabinCR")})[3]
+      theta.hat <- bbEstDisp(success=ase.cts, size=cts, x=x, beta=fit.mle$map, minDisp=1, maxDisp=500)
+      mle <- cbind(fit.mle$map[,groups[i]], fit.mle$sd[,groups[i]])
+      param <- cbind(theta.hat, cts)
+      mapTimes[i] = system.time({fit.map <- apeglm(Y=ase.cts, x=x, log.lik=NULL, param=param, coef=groups[i], mle=mle, log.link=FALSE, method = "betabinCR")})[3]
+    })[3]
+    print(i)
+  }
+  return(list(mleTimes = mleTimes,
+              totalTimes = totalTimes,
+              mapTimes = mapTimes,
+              fit.last = fit.map))
+}
+
+#similar to partitionDataC(), except the orginal source code is being used
+partitionDataO = function(groups, n=100) {
+  set.seed(1)
+  mleTimes = vector("double", length(groups))
+  mapTimes = vector("double", length(groups))
+  totalTimes = vector("double", length(groups))
+  for (i in 1:length(groups)) {
+    f = factor(rep(1:groups[i], ceiling(n/groups[i])))[1:100]
+    x = model.matrix(~f)
+    theta.hat.0 = 100
+    param <- cbind(theta.hat.0, cts)
+   totalTimes[i] = system.time({
+      fit.mle <- apeglm(Y=ase.cts, x=x, log.lik=betabinom.log.lik, param=param, no.shrink=TRUE, log.link=FALSE)
+      theta.hat <- bbEstDisp(success=ase.cts, size=cts, x=x, beta=fit.mle$map, minDisp=1, maxDisp=500)
+      param <- cbind(theta.hat, cts)
+      mleTimes[i] = system.time({fit.mle <- apeglm(Y=ase.cts, x=x, log.lik=betabinom.log.lik, param=param, no.shrink=TRUE, log.link=FALSE)})[3]
+      theta.hat <- bbEstDisp(success=ase.cts, size=cts, x=x, beta=fit.mle$map, minDisp=1, maxDisp=500)
+      mle <- cbind(fit.mle$map[,groups[i]], fit.mle$sd[,groups[i]])
+      param <- cbind(theta.hat, cts)
+      mapTimes[i] = system.time({fit.map <- apeglm(Y=ase.cts, x=x, log.lik=betabinom.log.lik, param=param, coef=groups[i], mle=mle, log.link=FALSE)})[3]
+    print(i)
+    })[3]
+  }
+  return(list(mleTimes = mleTimes,
+              totalTimes = totalTimes,
+              mapTimes = mapTimes,
+              fit.last = fit.map))
+}
+
+#similar to PartitionDataC(), except MLE is being estimated 
+partitionDataM = function(groups, n=100, tolerance=1e-14) {
+  set.seed(1)
+  mleTimes = vector("double", length(groups))
+  for (i in 1:length(groups)) {
+    f = factor(rep(1:groups[i], ceiling(n/groups[i])))[1:100]
+    x = model.matrix(~f)
+    theta.hat.0 = 100
+    param <- cbind(theta.hat.0, cts)
+    fit.mle <- apeglm(Y=ase.cts, x=x, log.lik=NULL, param=param, no.shrink=TRUE, log.link=FALSE, method = "betabinC")
+    theta.hat <- bbEstDisp(success=ase.cts, size=cts, x=x, beta=fit.mle$map, minDisp=1, maxDisp=500)
+    param <- cbind(theta.hat, cts)
+    fit.mle2 <- apeglm(Y=ase.cts, x=x, log.lik=NULL, param=param, no.shrink=TRUE, log.link=FALSE, method = "betabinCR")
+    mle <- cbind(fit.mle2$map[,groups[i]], fit.mle2$sd[,groups[i]])
+    print(i)
+  }
+  return(list(fit.last = fit.mle2))
+}
+
+#similar to PartitionDataC(), except MLE is being estimated and theta (overdispersion) is estimated with more fine precision
+partitionDataMT = function(groups, n=100, tolerance=1e-14, maxtheta=500, precision=1) {
+  mleTimes = vector("double", length(groups))
+  for (i in 1:length(groups)) {
+    set.seed(1)
+    f = factor(rep(1:groups[i], ceiling(n/groups[i])))[1:n]
+    x = model.matrix(~f)
+    theta.hat.0 = 100
+    param <- cbind(theta.hat.0, cts)
+    times = system.time({
+      fit.mle <- apeglm(Y=ase.cts, x=x, log.lik=NULL, param=param, no.shrink=TRUE, log.link=FALSE, method = "betabinC")
+      theta.hat <- bbEstDisp(success=ase.cts, size=cts, x=x, beta=fit.mle$map, minDisp=1, maxDisp=maxtheta)
+      for (j in 1:precision) {
+      param <- cbind(theta.hat, cts)
+      fit.mle <- apeglm(Y=ase.cts, x=x, log.lik=NULL, param=param, no.shrink=TRUE, log.link=FALSE, method = "betabinC")
+      theta.hat <- bbEstDisp(success=ase.cts, size=cts, x=x, beta=fit.mle$map, minDisp=1, maxDisp=maxtheta)
+      }
+      param <- cbind(theta.hat, cts)
+      fit.mle2 <- apeglm(Y=ase.cts, x=x, log.lik=NULL, param=param, no.shrink=TRUE, log.link=FALSE, method = "betabinCR")
+      print(i)
+    })
+    mleTimes[i] = times[3]
+  }
+  return(list(fit.last = fit.mle2,
+              theta.last = theta.hat,
+              mleTimes = mleTimes))
+}
+
+
+#similar to partitionDataM(), except aod is being used to compute MLEs    
+partitionDataA = function(groups, n2=100) {
+  set.seed(1)
+  mleTimes = vector("double", length(groups))
+  warnList=list()
+  withCallingHandlers({
+  for (i in 1:length(groups)) {
+    warnList[[i]]=list()
+    f = factor(rep(1:groups[i], ceiling(n2/groups[i])))[1:n2]
+    aodModels = list()
+    times = system.time({
+      for (j in 1:nrow(ase.cts)) {
+        x = model.matrix(~f)
+        y = ase.cts[j,]
+        n = cts[j,]
+        x = x[n>=1,]
+        y = y[n>=1]
+        n = n[n>=1]
+        xnam <- paste("x[,", 2:groups[i], "]", sep="")
+        fmla <- as.formula(paste("cbind(y,n-y) ~ ", paste(xnam, collapse= "+")))
+        fit.aod = betabin(fmla, ~1, data = as.data.frame(cbind(y,n,x)))
+        aodModels[[j]] = fit.aod
+      }
+    })
+    mleTimes[i] = times[3]
+  mat = rep(0, groups[i])
+  for (k in 1:nrow(ase.cts)) mat = rbind(mat, coef(aodModels[[k]]))
+  aodMle = mat[-1,]
+  print(i)
+  }
+  }, warning = function(w){
+    warnList[[i]][[j]] <<- w$message
+  })
+  return(list(fit.last = aodMle,
+              mleTimes = mleTimes,
+              warnList=warnList))
+}
+
+#similar to partitionDataM(), except VGAM is being used to compute MLEs    
+partitionDataV = function(groups, n2=100) {
+  set.seed(1)
+  mleTimes = vector("double", length(groups))
+  warnList=list()
+  for (i in 1:length(groups)) {
+    f = factor(rep(1:groups[i], ceiling(n2/groups[i])))[1:n2]
+    vgamModels = list()
+    times = system.time({
+      for (j in 1:nrow(ase.cts)) {
+        x = model.matrix(~f)
+        y = ase.cts[i,]
+        xnam <- paste("x[,", 2:groups[i], "]", sep="")
+        fmla <- as.formula(paste("cbind(y,n-y) ~ ", paste(xnam, collapse= "+")))
+        fit.vgam = vglm(cbind(y,n-y)~fmla, betabinomial(), trace = FALSE, subset = n>1)
+        vgamModels[[j]] = fit.vgam
+      }
+    })
+    mleTimes[i] = times[3]
+  mat = rep(0, groups[i])
+  for (k in 1:nrow(ase.cts)) mat = rbind(mat, coef(vgamModels[[k]]))
+  vgamMle = mat[-1,]
+  print(i)
+  }
+  return(list(fit.last = aodMle,
+              mleTimes = mleTimes,
+              warnList=warnList))
+}
+
+
+
+#like partitionDataC() but with my code, not Mike's
+partitionDataMyC = function(groups, n=100, tolerance=1e-14) {
+  set.seed(1)
+  mleTimes = vector("double", length(groups))
+  totalTimes = vector("double", length(groups))
+  mapTimes = vector("double", length(groups))
+  for (i in 1:length(groups)) {
+    f = factor(rep(1:groups[i], ceiling(n/groups[i])))[1:100]
+    x = model.matrix(~f)
+    theta.hat.0 = 100
+    param <- cbind(theta.hat.0, cts)
+    totalTimes[i] = system.time({
+      fit.mle <- myApeglm::apeglm(Y=ase.cts, x=x, log.lik=NULL, param=param, no.shrink=TRUE, log.link=FALSE, method = "betabinC")
+      theta.hat <- myApeglm::bbEstDisp(success=ase.cts, size=cts, x=x, beta=fit.mle$map, minDisp=1, maxDisp=500)
+      param = cbind(theta.hat, cts)
+      mleTimes[i] = system.time({fit.mle <- myApeglm::apeglm(Y=ase.cts, x=x, log.lik=NULL, param=param, no.shrink=TRUE, log.link=FALSE, method = "betabinCR")})[3]
+      theta.hat <- myApeglm::bbEstDisp(success=ase.cts, size=cts, x=x, beta=fit.mle$map, minDisp=1, maxDisp=500)
+      mle <- cbind(fit.mle$map[,groups[i]], fit.mle$sd[,groups[i]])
+      param <- cbind(theta.hat, cts)
+      mapTimes[i] = system.time({fit.map <- myApeglm::apeglm(Y=ase.cts, x=x, log.lik=NULL, param=param, coef=groups[i], mle=mle, log.link=FALSE, method = "betabinCR")})[3]
+    })[3]
+    print(i)
+  }
+  return(list(mleTimes = mleTimes,
+              totalTimes = totalTimes,
+              mapTimes = mapTimes,
+              fit.last = fit.map))
+}
+
+comparePckgs = function(i,j) {
+f = factor(rep(1:i, ceiling(100/i)))[1:100]
+x = model.matrix(~f)
+y = ase.cts[j,]
+n = cts[j,]
+xnam <- paste("x[,", 2:i, "]", sep="")
+fmla <- as.formula(paste("cbind(y,n-y) ~ ", paste(xnam, collapse= "+")))
+fit.aod = betabin(fmla, ~1, data = as.data.frame(cbind(y,n,x)))
+fit.vgam =  vglm(fmla, betabinomial(), trace = FALSE, subset = n>1)
+y=t(as.matrix((ase.cts[j,])))
+n=t(as.matrix(cts[j,]))
+theta.hat.0 = 100
+param <- cbind(theta.hat.0, n)
+fit.mle <- apeglm(Y=y, x=x, log.lik=NULL, param=param, no.shrink=TRUE, log.link=FALSE, method = "betabinC")
+theta.hat <- bbEstDisp(success=y, size=n, x=x, beta=fit.mle$map, minDisp=1, maxDisp=500)
+param <- cbind(theta.hat, n)
+fit.mle <- apeglm(Y=y, x=x, log.lik=NULL, param=param, no.shrink=TRUE, log.link=FALSE, method = "betabinC")
+theta.hat <- bbEstDisp(success=y, size=n, x=x, beta=fit.mle$map, minDisp=1, maxDisp=500)
+param <- cbind(theta.hat, n)
+fit.mle2 <- apeglm(Y=y, x=x, log.lik=NULL, param=param, no.shrink=TRUE, log.link=FALSE, method = "betabinC")
+return(list(apeglm=fit.mle2$map, vgam=t(coef(fit.vgam)[-2]), aod=t(coef(fit.aod)), apeglmTheta=theta.hat, fullApeglm = fit.mle2, fullVgam = fit.vgam, fullAod = fit.aod))
+}
+
+getLogLik = function(beta, x, y, n, theta) {
+  prob = 1/(1+exp(-x%*%beta))
+  lik = sum(dbetabinom(y, prob = prob, size = n, theta = theta, log = TRUE))
+  return(lik)
+}
+```
+
+## Simulation - Computational Performance
+
+We simulate $\bY_{5000 \times 100} = [Y_{ij}]$ from $\text{BetaBin}(n_{ij}, p_i, \phi_i)$, $\boldsymbol \phi = (\phi_1,...,\phi_{5000})^T$ from $U(1,1000)$, $\mathbf p = (p_1,...,p_{5000})$ and $N(.5,.05)$, $\mathbf N_{5000 \times 100} = [n_{ij}]$ from $\text{NB}(\mu_i, 1/\theta_i)$, where $\boldsymbol \mu = (\mu_1,...,\mu_{5000}), \boldsymbol \theta = (\theta_1,...,\theta_{5000})$ are DESeq2 estimates from the airway dataset in line with the vignette. $\bY$ and $\mathbf N$ are 5000 gene by 100 sample matrices of simulated allele-specific and total counts for one of two alleles. It is assumed that all 100 samples have the same two alleles for all 5000 genes. 
+
+```{r simulation, echo=F, results='hide', warning=FALSE, message=FALSE}
+### CREATING DATASET ###
+
+#airway - Read counts per gene for airway smooth muscle cell lines RNA-Seq experiment
+set.seed(1)
+data(airway)                                               
+
+#getting first 5000 genes with at least 10 count across all samples
+keep <- head(which(rowSums(assay(airway)) > 10), 5000) 
+airwayOrig = airway
+airway <- airway[keep,]                                             #subsetting S4 objects is different from subsetting standard data frames
+
+#using DESeq2 to get dispersion and size factor estimates 
+dds <- DESeqDataSet(airway, ~cell + dex) 
+dds$dex <- relevel(dds$dex, "untrt")
+dds <- DESeq(dds)
+res <- results(dds)
+
+#simulating 100 samples across 5000 genes
+rbetabinom=emdbook::rbetabinom
+dbetabinom=emdbook::dbetabinom
+n <- 100
+mu <- ifelse(res$baseMean > 50, res$baseMean, 50)                   #to-be means (looped)
+set.seed(1)
+cts <- matrix(rnbinom(nrow(dds)*n,                                  #5000x100 matrix of NB(mean, dispersion) counts
+                      mu=mu,
+                      size=1/dispersions(dds)),
+              ncol=n)
+theta <- runif(nrow(cts),1,1000)                                    #5000 (uniform) randoms btw 1 and 1000
+prob <- rnorm(nrow(cts),.5,.05)                                     #5000 (normal) randoms close to 0.5 (allele imbalance)
+ase.cts <- matrix(rbetabinom(prod(dim(cts)), prob=prob,             #5000x100 matrix of rbetabinom(prob, size, theta, shape1, shape2) randoms
+                             size=cts, theta=rep(theta,ncol(cts))),
+                  nrow=nrow(cts))
+#results in a 5000x100 matrix of beta-binomially distributed counts, where the trial numbers are random (following the various (estimated) NB distributions from the previous data set), the probabilities are random (normally distributed and concentrated near 0.5), and random overdispersion is introduced (distributed as uniform from 1 to 1000). Assume these represent the number of reads belonging to a single (of two) alleles, thus assuming all samples have two different alleles for all genes, and they are the same two alleles. 'cts' is the reads, 'theta' is random dispersion, 'prob' is the allelic imbalance) 
+```
+
+## microbenchmarking
+```{r}
+dummyList = list(1,1,1,1,1,1,1,1,1,1)
+timesAod = list()
+timesVgam = list()
+timesProreg = list()
+timesGamlss = list()
+timesAods3 = list()
+timesHrq = list()
+timesApeglm = list()
+for (i in 2:10) {
+  f = factor(rep(1:i, ceiling(100/i)))[1:100]
+  x = model.matrix(~f)
+  xnam <- paste("x[,", 2:i, "]", sep="")
+  fmla <- as.formula(paste("cbind(y,n-y) ~ ", paste(xnam, collapse= "+")))
+  fmla2 <- as.formula(paste("y ~ ", paste(xnam, collapse= "+")))
+  timesAod[[i]] = microbenchmark({
+  y = ase.cts[1,]
+  n = cts[1,]
+  fit.aod = suppressWarnings({betabin(fmla, ~1, data = as.data.frame(cbind(y,n,x)))})
+  dummyList[[i]] = fit.aod
+  })
+  timesVgam[[i]] = microbenchmark({
+  y = ase.cts[1,]
+  n = cts[1,]
+  fit.vgam =  suppressWarnings({vglm(fmla, betabinomial(), trace = FALSE, subset = n>1)})
+  dummyList[[i]] = fit.vgam
+  })
+  timesProreg[[i]] = microbenchmark({
+  y = ase.cts[1,]
+  n = cts[1,]
+  fit.proreg = suppressWarnings({PROreg::BBreg(fmla2, m=n)})
+  dummyList[[i]] = fit.proreg
+  })
+  timesGamlss[[i]] = microbenchmark({
+  y = ase.cts[1,]
+  n = cts[1,]
+  fit.gamlss = suppressWarnings({gamlss(fmla, family=BB, data = as.data.frame(cbind(y,n,x[,-1])))})
+  dummyList[[i]] = fit.gamlss
+  })
+  timesAods3[[i]] = microbenchmark({
+  y = ase.cts[1,]
+  n = cts[1,]
+  fit.aods3 =  suppressWarnings({aodml(fmla, data = as.data.frame(cbind(y,n,x[,-1])), family="bb")})
+  dummyList[[i]] = fit.aods3
+  })
+  timesHrq[[i]] = microbenchmark({
+  y = ase.cts[1,]
+  n = cts[1,]
+  fit.hrq = suppressWarnings({HRQoL::BBreg(fmla2, m=n)})
+  dummyList[[i]] = fit.hrq
+  })
+  y=t(as.matrix((ase.cts[1,])))
+  n=t(as.matrix(cts[1,]))
+  timesApeglm[[i]] = microbenchmark({
+    theta.hat.0 = 100
+    param <- cbind(theta.hat.0, n)
+    fit.mle <- apeglm(Y=y, x=x, log.lik=NULL, param=param, no.shrink=TRUE, log.link=FALSE, method = "betabinC")
+    theta.hat <- bbEstDisp(success=y, size=n, x=x, beta=fit.mle$map, minDisp=1, maxDisp=500)
+    param <- cbind(theta.hat, n)
+    fit.mle <- apeglm(Y=y, x=x, log.lik=NULL, param=param, no.shrink=TRUE, log.link=FALSE, method = "betabinC")
+    theta.hat <- bbEstDisp(success=y, size=n, x=x, beta=fit.mle$map, minDisp=1, maxDisp=500)
+    param <- cbind(theta.hat, n)
+    fit.mle2 <- apeglm(Y=y, x=x, log.lik=NULL, param=param, no.shrink=TRUE, log.link=FALSE, method = "betabinCR")
+  })
+  cat("\n FINISHED AN ITERATION \n")
+}
+
+iWantToBeDoneWithThisPaperAlready = function(ls) {
+  mean(ls$time)
+}
+meanAodTimes = unlist(lapply(timesAod, iWantToBeDoneWithThisPaperAlready))
+meanGamlssTimes = unlist(lapply(timesGamlss, iWantToBeDoneWithThisPaperAlready))
+meanHrqTimes = unlist(lapply(timesHrq, iWantToBeDoneWithThisPaperAlready))
+meanAods3Times = unlist(lapply(timesAods3, iWantToBeDoneWithThisPaperAlready))
+meanVgamTimes = unlist(lapply(timesVgam, iWantToBeDoneWithThisPaperAlready))
+meanAodTimes/100000
+meanGamlssTimes/100000
+meanHrqTimes/100000
+meanAods3Times/100000
+meanVgamTimes/100000
+#one or two of the packages were giving a lot of warnings
+```
+
+## microbenchmark plot
+```{r}
+meanAodTimes = unlist(lapply(timesAod, iWantToBeDoneWithThisPaperAlready))[2:10]/1000000
+meanGamlssTimes = unlist(lapply(timesGamlss, iWantToBeDoneWithThisPaperAlready))[2:10]/1000000
+meanHrqTimes = unlist(lapply(timesHrq, iWantToBeDoneWithThisPaperAlready))[2:10]/1000000
+meanAods3Times = unlist(lapply(timesAods3, iWantToBeDoneWithThisPaperAlready))[2:10]/1000000
+meanVgamTimes = unlist(lapply(timesVgam, iWantToBeDoneWithThisPaperAlready))[2:10]/1000000
+meanProregTimes = unlist(lapply(timesProreg, iWantToBeDoneWithThisPaperAlready))[2:10]/1000000
+meanApeglmTimes = unlist(lapply(timesApeglm, iWantToBeDoneWithThisPaperAlready))[2:10]/1000000
+timesMicro = data.frame(times=c(meanAodTimes, meanGamlssTimes, meanHrqTimes, meanAods3Times, meanVgamTimes, meanApeglmTimes),
+Package = c(rep("aod", 9), rep("gamlss", 9), rep("HRQoL", 9), rep("aods3", 9), rep("VGAM", 9), rep("apeglm", 9)))
+
+timesMicro = data.frame(meanAodTimes, meanGamlssTimes, meanHrqTimes, meanAods3Times, meanVgamTimes, meanApeglmTimes, meanProregTimes)
+#write.csv(timesMicro, "~/Desktop/timesMicro.csv")
+```
+
+```{r}
+times = read.csv("~/Desktop/timesMicro.csv")
+attach(times)
+timesMicro = data.frame(times=c(meanAodTimes, meanGamlssTimes, meanHrqTimes, meanAods3Times, meanVgamTimes, meanApeglmTimes),
+Package = c(rep("aod", 9), rep("gamlss", 9), rep("HRQoL", 9), rep("aods3", 9), rep("VGAM", 9), rep("apeglm", 9)))
+detach(times)
+```
+
+```{r}
+ggplot(data = timesMicro, mapping = aes(y=times, x=rep(c(2:10), 6), color=Package, fill=Package)) +
+  geom_point(mapping = aes(shape=Package), size=2) +
+  geom_line() +
+  ylab("Time (in milliseconds)") +
+  xlab("Number of Groups") + 
+  scale_y_continuous(trans = "log2", breaks=c(7,15,30,60,125,250,500,1000,2000)) +
+  scale_color_manual(values = dichromat(c("#000000","#CDCD00","#D55E00","#0000FF", "#FF69B4", "#56B4E9"))) +
+  scale_fill_manual(values = dichromat(c("#000000","#CDCD00","#D55E00","#0000FF", "#FF69B4", "#56B4E9"))) +
+  scale_shape_manual(values = c(16,24,25,22,23,0)) + 
+  theme_minimal()
+```
+
+```{r}
+microBench = ggplot(data = timesMicro, mapping = aes(y=times, x=rep(c(2:10), 6), color=Package, fill=Package)) +
+  geom_point(mapping = aes(shape=Package), size=2) +
+  geom_line() +
+  ylab("Estimation Time") +
+  xlab("Number of Groups") + 
+  scale_y_continuous(trans = "log2", breaks=c(7,15,30,60,125,250,500,1000,2000)) +
+  scale_color_manual(values = c("#000000","#CDCD00","#D55E00","#0000FF", "#FF69B4", "#56B4E9")) +
+  scale_fill_manual(values = c("#000000","#CDCD00","#D55E00","#0000FF", "#FF69B4", "#56B4E9")) +
+  scale_shape_manual(values = c(16,24,25,22,23,0)) + 
+  theme_minimal() +
+  ggsave("~/Desktop/ResultsLove/PaperPlots/microbench.eps", device = "eps", width = 10, height = 4.5) +
+  ggsave("~/Desktop/ResultsLove/PaperPlots/microbench.png", width = 10, height = 4.5)
+microBench
+```
+
+## Aod 2-10 groups
+```{r}
+groups = 2:10
+#resA = partitionDataA(groups)
+#saveRDS(resA, "~/Desktop/resA.rds")
+resA = readRDS("~/Desktop/resA.rds")
+cat("problems for 2 groups\n")
+summary(as.factor((unlist(resA$warnList[[1]]))))
+cat("problems for 4 groups\n")
+summary(as.factor((unlist(resA$warnList[[3]]))))
+cat("problems for 5 groups\n")
+summary(as.factor((unlist(resA$warnList[[4]]))))
+cat("problems for 6 groups\n")
+summary(as.factor((unlist(resA$warnList[[5]]))))
+cat("problems for 10 groups\n")
+summary(as.factor((unlist(resA$warnList[[9]]))))
+```
+
+## Comparisons of estimates and their associated log-likelihoods 
+There does appear to be noteworthy differences between apeglm and aod and many instances of convergence failures for aod, but they are not neccesarily related. C++ estimates are always closer to VGAM and have a higher log-likelihood (even for genes where converence occurs for all method).
+
+```{r}
+cat("coefficient estimates and associated log-likelihoods for apeglm, VGAM and ash (in that order)")
+i=2
+j=636
+cmp1 = comparePckgs(i, j)
+cat("\n")
+cmp1$apeglm
+cmp1$vgam
+cmp1$aod
+y = ase.cts[j,]
+n = cts[j,]
+f = factor(rep(1:i, ceiling(100/i)))[1:100]
+x = model.matrix(~f)
+getLogLik(as.vector(cmp1$apeglm), x, y, n, cmp1$apeglmTheta)
+getLogLik(as.vector(cmp1$vgam), x, y, n, cmp1$apeglmTheta)
+getLogLik(as.vector(cmp1$aod), x, y, n, cmp1$apeglmTheta)
+
+i=2
+j=374
+cmp1 = comparePckgs(i, j)
+cat("\n")
+cmp1$apeglm
+cmp1$vgam
+cmp1$aod
+y = ase.cts[j,]
+n = cts[j,]
+f = factor(rep(1:i, ceiling(100/i)))[1:100]
+x = model.matrix(~f)
+getLogLik(as.vector(cmp1$apeglm), x, y, n, cmp1$apeglmTheta)
+getLogLik(as.vector(cmp1$vgam), x, y, n, cmp1$apeglmTheta)
+getLogLik(as.vector(cmp1$aod), x, y, n, cmp1$apeglmTheta)
+
+i=10
+j=189
+cmp1 = comparePckgs(i, j)
+cat("\n")
+cmp1$apeglm
+cmp1$vgam
+cmp1$aod
+y = ase.cts[j,]
+n = cts[j,]
+f = factor(rep(1:i, ceiling(100/i)))[1:100]
+x = model.matrix(~f)
+getLogLik(as.vector(cmp1$apeglm), x, y, n, cmp1$apeglmTheta)
+getLogLik(as.vector(cmp1$vgam), x, y, n, cmp1$apeglmTheta)
+getLogLik(as.vector(cmp1$aod), x, y, n, cmp1$apeglmTheta)
+
+i=10
+j=2
+cmp1 = comparePckgs(i, j)
+cat("\n")
+cmp1$apeglm
+cmp1$vgam
+cmp1$aod
+y = ase.cts[j,]
+n = cts[j,]
+f = factor(rep(1:i, ceiling(100/i)))[1:100]
+x = model.matrix(~f)
+getLogLik(as.vector(cmp1$apeglm), x, y, n, cmp1$apeglmTheta)
+getLogLik(as.vector(cmp1$vgam), x, y, n, cmp1$apeglmTheta)
+getLogLik(as.vector(cmp1$aod), x, y, n, cmp1$apeglmTheta)
+
+i=5
+j=177
+cmp1 = comparePckgs(i, j)
+cat("\n")
+cmp1$apeglm
+cmp1$vgam
+cmp1$aod
+y = ase.cts[j,]
+n = cts[j,]
+f = factor(rep(1:i, ceiling(100/i)))[1:100]
+x = model.matrix(~f)
+getLogLik(as.vector(cmp1$apeglm), x, y, n, cmp1$apeglmTheta)
+getLogLik(as.vector(cmp1$vgam), x, y, n, cmp1$apeglmTheta)
+getLogLik(as.vector(cmp1$aod), x, y, n, cmp1$apeglmTheta)
+
+i=5
+j=363
+cmp1 = comparePckgs(i, j)
+cat("\n")
+cmp1$apeglm
+cmp1$vgam
+cmp1$aod
+y = ase.cts[j,]
+n = cts[j,]
+f = factor(rep(1:i, ceiling(100/i)))[1:100]
+x = model.matrix(~f)
+getLogLik(as.vector(cmp1$apeglm), x, y, n, cmp1$apeglmTheta)
+getLogLik(as.vector(cmp1$vgam), x, y, n, cmp1$apeglmTheta)
+getLogLik(as.vector(cmp1$aod), x, y, n, cmp1$apeglmTheta)
+
+i=10
+j=5
+cmp1 = comparePckgs(i, j)
+cat("\n")
+cmp1$apeglm
+cmp1$vgam
+cmp1$aod
+y = ase.cts[j,]
+n = cts[j,]
+f = factor(rep(1:i, ceiling(100/i)))[1:100]
+x = model.matrix(~f)
+getLogLik(as.vector(cmp1$apeglm), x, y, n, cmp1$apeglmTheta)
+getLogLik(as.vector(cmp1$vgam), x, y, n, cmp1$apeglmTheta)
+getLogLik(as.vector(cmp1$aod), x, y, n, cmp1$apeglmTheta)
+
+i=2
+j=1
+cmp1 = comparePckgs(i, j)
+cat("\n")
+cmp1$apeglm
+cmp1$vgam
+cmp1$aod
+y = ase.cts[j,]
+n = cts[j,]
+f = factor(rep(1:i, ceiling(100/i)))[1:100]
+x = model.matrix(~f)
+getLogLik(as.vector(cmp1$apeglm), x, y, n, cmp1$apeglmTheta)
+getLogLik(as.vector(cmp1$vgam), x, y, n, cmp1$apeglmTheta)
+getLogLik(as.vector(cmp1$aod), x, y, n, cmp1$apeglmTheta)
+
+i=2
+j=1
+cmp1 = comparePckgs(i, j)
+cat("\n")
+cmp1$apeglm
+cmp1$vgam
+cmp1$aod
+y = ase.cts[j,]
+n = cts[j,]
+f = factor(rep(1:i, ceiling(100/i)))[1:100]
+x = model.matrix(~f)
+getLogLik(as.vector(cmp1$apeglm), x, y, n, cmp1$apeglmTheta)
+getLogLik(as.vector(cmp1$vgam), x, y, n, cmp1$apeglmTheta)
+getLogLik(as.vector(cmp1$aod), x, y, n, cmp1$apeglmTheta)
+
+i=10
+j=1
+cmp1 = comparePckgs(i, j)
+cat("\n")
+cmp1$apeglm
+cmp1$vgam
+cmp1$aod
+y = ase.cts[j,]
+n = cts[j,]
+f = factor(rep(1:i, ceiling(100/i)))[1:100]
+x = model.matrix(~f)
+getLogLik(as.vector(cmp1$apeglm), x, y, n, cmp1$apeglmTheta)
+getLogLik(as.vector(cmp1$vgam), x, y, n, cmp1$apeglmTheta)
+getLogLik(as.vector(cmp1$aod), x, y, n, cmp1$apeglmTheta)
+
+i=10
+j=2071
+cmp1 = comparePckgs(i, j)
+cat("\n")
+cmp1$apeglm
+cmp1$vgam
+cmp1$aod
+y = ase.cts[j,]
+n = cts[j,]
+f = factor(rep(1:i, ceiling(100/i)))[1:100]
+x = model.matrix(~f)
+getLogLik(as.vector(cmp1$apeglm), x, y, n, cmp1$apeglmTheta)
+getLogLik(as.vector(cmp1$vgam), x, y, n, cmp1$apeglmTheta)
+getLogLik(as.vector(cmp1$aod), x, y, n, cmp1$apeglmTheta)
+
+i=10
+j=3184
+cmp1 = comparePckgs(i, j)
+cat("\n")
+cmp1$apeglm
+cmp1$vgam
+cmp1$aod
+y = ase.cts[j,]
+n = cts[j,]
+f = factor(rep(1:i, ceiling(100/i)))[1:100]
+x = model.matrix(~f)
+getLogLik(as.vector(cmp1$apeglm), x, y, n, cmp1$apeglmTheta)
+getLogLik(as.vector(cmp1$vgam), x, y, n, cmp1$apeglmTheta)
+getLogLik(as.vector(cmp1$aod), x, y, n, cmp1$apeglmTheta)
+
+i=10
+j=2958
+cmp1 = comparePckgs(i, j)
+cat("\n")
+cmp1$apeglm
+cmp1$vgam
+cmp1$aod
+y = ase.cts[j,]
+n = cts[j,]
+f = factor(rep(1:i, ceiling(100/i)))[1:100]
+x = model.matrix(~f)
+getLogLik(as.vector(cmp1$apeglm), x, y, n, cmp1$apeglmTheta)
+getLogLik(as.vector(cmp1$vgam), x, y, n, cmp1$apeglmTheta)
+getLogLik(as.vector(cmp1$aod), x, y, n, cmp1$apeglmTheta)
+
+i=10
+j=4526
+cmp1 = comparePckgs(i, j)
+cat("\n")
+cmp1$apeglm
+cmp1$vgam
+cmp1$aod
+y = ase.cts[j,]
+n = cts[j,]
+f = factor(rep(1:i, ceiling(100/i)))[1:100]
+x = model.matrix(~f)
+getLogLik(as.vector(cmp1$apeglm), x, y, n, cmp1$apeglmTheta)
+getLogLik(as.vector(cmp1$vgam), x, y, n, cmp1$apeglmTheta)
+getLogLik(as.vector(cmp1$aod), x, y, n, cmp1$apeglmTheta)
+
+i=10
+j=4852
+cmp1 = comparePckgs(i, j)
+cat("\n")
+cmp1$apeglm
+cmp1$vgam
+cmp1$aod
+y = ase.cts[j,]
+n = cts[j,]
+f = factor(rep(1:i, ceiling(100/i)))[1:100]
+x = model.matrix(~f)
+getLogLik(as.vector(cmp1$apeglm), x, y, n, cmp1$apeglmTheta)
+getLogLik(as.vector(cmp1$vgam), x, y, n, cmp1$apeglmTheta)
+getLogLik(as.vector(cmp1$aod), x, y, n, cmp1$apeglmTheta)
+```
+
+
+## Benchmarking Aod and VGAM Package
+
+Below gives elapsed time for ML estimation with apeglm and with aod. Apeglm was run with two iterations of overdispersion estimation. We can see that our package is substantially faster, and the difference grows the more groups are involved. Furthermore, aod frequently had converge issues (maximum iterations reached), while all of our estimates converged. Our estimates differed from aod, but between the convergence warnings issued and the fact that our estimates were much closer to VGAM than aod for one of the genes chosen at random, we conclude that it is our estimates that are correct. 
+
+```{r,echo=F}
+#calculating MLE times for 2-10 groups for aod package and apeglm w/ C++
+groups= c(2:10)
+resultsMC = partitionDataMT(groups, n = 100)
+timesMC = resultsMC$mleTimes
+timesA = resA$mleTimes
+#timesA = c(156.497, 266.266, 376.249, 473.081, 582.654, 684.976, 785.769, 908.438, 1112.053)
+#fit.last = read.csv("~/Desktop/10groupsaod.csv")
+#resultsA = list(mleTimes = timesA, fit.last = fit.last)
+
+#table of elapse times for each method by the associated number of covariates to estimate, or groups
+data.frame(2:10) %>%
+  cbind(timesA) %>%
+  cbind(timesMC) %>%
+  rename(groups = X2.10, aodTime = timesA, apeglmTime = timesMC)
+
+head(resA$fit.last)
+head(resultsMC$fit.last$map)
+```
+
+
+## Benchmarking new and old apeglm package
+
+Below gives elapsed time for ML estimation with apeglm and with aod. Both apeglm methods were run with one iteration of overdispersion estimation as in the vignette. Again, we can see that our package is substantially faster, and the difference grows the more groups are involved. With more iterations of overdispersion estimation, the difference between the two methods should grow (favoring the C++ method). 
+
+```{r,echo=F}
+resultsC = partitionDataC(groups)
+timesC = resultsC$totalTimes
+
+resultsO = partitionDataO(groups)
+timesO = resultsO$totalTimes
+```
+
+## paper-ready plot for computation time
+The plots below are based on my code, not Mike's (i.e. we don't re-run anything in R unless convergence was not achieved in C++). 
+```{r, echo=F}
+timesC = c(30.946,34.473,37.165,39.451,42.144,44.436,47.603,48.939,51.531)
+timesO = c(156.803, 262.406,  361.673,  511.782,  645.705,  813.858,  985.942, 1195.837, 1414.874)
+timesMC = c(23.900, 25.146, 27.278, 28.268, 29.690, 31.106, 32.879, 34.297, 35.497)
+timesA = c(165.787,  284.827,  399.067,  501.456,  643.628,  761.160,  869.816, 1014.554, 1176.624)
+timesApeglm = data.frame(times = c(timesC,timesO), Package = c(rep("apeglm (new)", 9), rep("apeglm (old)", 9)))
+
+apeglmPlot = ggplot(data = timesApeglm, mapping = aes(y=times, x=rep(c(2:10), 2), color=Package)) +
+  theme_minimal() +
+  geom_point(mapping = aes(shape=Package)) +
+  geom_line() +
+  ylab("Apeglm Estimation Time") +
+  xlab("Number of Groups") + 
+  scale_y_continuous(trans = "log2", breaks = c(2000,1000,500,250,120,60,30,15)) +
+  theme(legend.position="bottom") +
+  ggtitle(label = "b)")
+
+timesMLE = data.frame(times = c(timesA, timesMC), Package = c(rep("aod", 9), rep("apeglm (new)", 9)))
+timesMLE$Package <- factor(timesMLE$Package, levels = c("apeglm (new)","aod"))
+
+mlePlot = ggplot(data = timesMLE, mapping = aes(y=times, x=rep(c(2:10), 2), color=Package)) +
+  theme_minimal() +
+  geom_point(mapping = aes(shape=Package)) +
+  geom_line() +
+  ylab("ML Estimation Time") +
+  xlab("Number of Groups") + 
+  scale_y_continuous(trans = "log2", breaks = c(2000,1000,500,250,120,60,30, 15)) +
+  theme(legend.position="bottom") +
+  ggtitle(label = "a)")
+
+timePlot = cowplot::plot_grid(mlePlot, apeglmPlot, align = "hv", ncol=2) +
+  ggsave("~/Desktop/ResultsLove/PaperPlots/timeplot.eps", device = "eps", width = 10, height = 4.5) +
+  ggsave("~/Desktop/ResultsLove/PaperPlots/timeplot.png")
+timePlot
+```
+
+## Benchmarking with Numeric Example
+
+We now have three variables. $\bx_1$ is an indicator that splits the data into two groups, $\bx_2 \sim N(0,1)$ and $\bx_3 \sim N(0,1)$. We compare apeglm estimation between the new and old package as well as ML estimation between apeglm and aod. Like before, two iterations were used for overdispersion estimation when getting the MLE using apeglm. 
+
+```{r, echo=F}
+f = factor(rep(1:2, 50))
+x = model.matrix(~f)
+x = cbind(x, rnorm(100))
+x = cbind(x, rnorm(100))  
+aodModels2 = list()
+set.seed(1)
+
+cat("time for ML estimation, aod")
+system.time({
+for (i in 1:nrow(ase.cts)) {
+  y = ase.cts[i,]
+  n = cts[i,]
+  y = y[n>=1]
+  n = n[n>=1]
+  suppressWarnings({fit.aod = betabin(cbind(y,n-y)~f2+V4+V5, ~1, data = as.data.frame(cbind(y,n,x[,c(2:4)])))})
+  aodModels2[[i]] = fit.aod
+  if (i%%500==0) print(i)
+}
+})
+
+cat("time for ML estimation, apeglm w/ C++")
+maxtheta=500
+system.time({
+  theta.hat.0 = 100
+  param <- cbind(theta.hat.0, cts)
+  fit.mle <- apeglm(Y=ase.cts, x=x, log.lik=NULL, param=param, no.shrink=TRUE, log.link=FALSE, method = "betabinC")
+  theta.hat <- bbEstDisp(success=ase.cts, size=cts, x=x, beta=fit.mle$map, minDisp=1, maxDisp=maxtheta)
+  param <- cbind(theta.hat, cts)
+  fit.mle <- apeglm(Y=ase.cts, x=x, log.lik=NULL, param=param, no.shrink=TRUE, log.link=FALSE, method = "betabinC")
+  theta.hat <- bbEstDisp(success=ase.cts, size=cts, x=x, beta=fit.mle$map, minDisp=1, maxDisp=maxtheta)
+  param <- cbind(theta.hat, cts)
+  fit.mle2 <- apeglm(Y=ase.cts, x=x, log.lik=NULL, param=param, no.shrink=TRUE, log.link=FALSE, method = "betabinCR")
+})
+
+cat("time for apeglm estimation w/ C++")
+system.time({
+  theta.hat.0 = 100
+  param <- cbind(theta.hat.0, cts)
+  fit.mle <- apeglm(Y=ase.cts, x=x, log.lik=NULL, param=param, no.shrink=TRUE, log.link=FALSE, method = "betabinC")
+  theta.hat <- bbEstDisp(success=ase.cts, size=cts, x=x, beta=fit.mle$map, minDisp=1, maxDisp=maxtheta)
+  param <- cbind(theta.hat, cts)
+  fit.mle <- apeglm(Y=ase.cts, x=x, log.lik=NULL, param=param, no.shrink=TRUE, log.link=FALSE, method = "betabinCR")
+  theta.hat <- bbEstDisp(success=ase.cts, size=cts, x=x, beta=fit.mle$map, minDisp=1, maxDisp=maxtheta)
+  param <- cbind(theta.hat, cts)
+  mle <- cbind(fit.mle$map[,2], fit.mle$sd[,2])
+  fit.mapN <- apeglm(Y=ase.cts, x=x, log.lik=NULL, param=param, coef=2, mle = mle, log.link=FALSE, method = "betabinCR")
+})
+
+cat("time for apeglm estimation, old package")
+system.time({
+  set.seed(1)
+  theta.hat.0 = 100
+  param <- cbind(theta.hat.0, cts)
+  fit.mle <- apeglm(Y=ase.cts, x=x, log.lik=betabinom.log.lik, param=param, no.shrink=TRUE, log.link=FALSE)
+  theta.hat <- bbEstDisp(success=ase.cts, size=cts, x=x, beta=fit.mle$map, minDisp=1, maxDisp=500)
+  param <- cbind(theta.hat, cts)
+  fit.mle <- apeglm(Y=ase.cts, x=x, log.lik=betabinom.log.lik, param=param, no.shrink=TRUE, log.link=FALSE)
+  theta.hat <- bbEstDisp(success=ase.cts, size=cts, x=x, beta=fit.mle$map, minDisp=1, maxDisp=500)
+  mle <- cbind(fit.mle$map[,2], fit.mle$sd[,2])
+  param <- cbind(theta.hat, cts)
+  fit.mapO <- apeglm(Y=ase.cts, x=x, log.lik=betabinom.log.lik, param=param, coef=2, mle=mle, log.link=FALSE)
+})
+
+ mat = rep(0, 4)
+  for (i in 1:nrow(ase.cts)) mat = rbind(mat, coef(aodModels2[[i]]))
+  aodMle2 = mat[-1,]
+  
+  cat("first few MLEs for aod and apeglm, and first few MAPs for old and new apeglm (in that order)")
+  head(aodMle2)
+  head(fit.mle2$map)
+  head(fit.mapO$map)
+  head(fit.mapN$map)
+```
+
+## Introducing Multicolinearity
+
+The above simulation was modified so that $\bx_3 \sim N(20\bx_1, 20^2)$ to introduce multicolinearity and see the effects on computational performance. $\bx_3$ was standardized to have mean 0 and variance 1, as suggested in the vignette. Performance was nearly identical.
+
+```{r, echo=F}
+f = factor(rep(1:2, 50))
+x = model.matrix(~f)
+x = cbind(x, rnorm(100))
+x = cbind(x, rnorm(100,x[,2]*20,20))  
+x[,4] = (x[,4] - mean(x[,4]))/sd(x[,4])
+aodModels2 = list()
+set.seed(1)
+
+cat("time for ML estimation, aod")
+system.time({
+for (i in 1:nrow(ase.cts)) {
+  y = ase.cts[i,]
+  n = cts[i,]
+  y = y[n>=1]
+  n = n[n>=1]
+  suppressWarnings({fit.aod = betabin(cbind(y,n-y)~f2+V4+V5, ~1, data = as.data.frame(cbind(y,n,x[,c(2:4)])))})
+  aodModels2[[i]] = fit.aod
+  if (i%%500==0) print(i)
+}
+})
+
+cat("time for ML estimation, apeglm w/ C++")
+maxtheta=500
+system.time({
+  theta.hat.0 = 100
+  param <- cbind(theta.hat.0, cts)
+  fit.mle <- apeglm(Y=ase.cts, x=x, log.lik=NULL, param=param, no.shrink=TRUE, log.link=FALSE, method = "betabinC")
+  theta.hat <- bbEstDisp(success=ase.cts, size=cts, x=x, beta=fit.mle$map, minDisp=1, maxDisp=maxtheta)
+  param <- cbind(theta.hat, cts)
+  fit.mle <- apeglm(Y=ase.cts, x=x, log.lik=NULL, param=param, no.shrink=TRUE, log.link=FALSE, method = "betabinC")
+  theta.hat <- bbEstDisp(success=ase.cts, size=cts, x=x, beta=fit.mle$map, minDisp=1, maxDisp=maxtheta)
+  param <- cbind(theta.hat, cts)
+  fit.mle2 <- apeglm(Y=ase.cts, x=x, log.lik=NULL, param=param, no.shrink=TRUE, log.link=FALSE, method = "betabinCR")
+})
+
+cat("time for apeglm estimation w/ C++")
+system.time({
+  theta.hat.0 = 100
+  param <- cbind(theta.hat.0, cts)
+  fit.mle <- apeglm(Y=ase.cts, x=x, log.lik=NULL, param=param, no.shrink=TRUE, log.link=FALSE, method = "betabinC")
+  theta.hat <- bbEstDisp(success=ase.cts, size=cts, x=x, beta=fit.mle$map, minDisp=1, maxDisp=maxtheta)
+  param <- cbind(theta.hat, cts)
+  fit.mle <- apeglm(Y=ase.cts, x=x, log.lik=NULL, param=param, no.shrink=TRUE, log.link=FALSE, method = "betabinCR")
+  theta.hat <- bbEstDisp(success=ase.cts, size=cts, x=x, beta=fit.mle$map, minDisp=1, maxDisp=maxtheta)
+  param <- cbind(theta.hat, cts)
+  mle <- cbind(fit.mle$map[,2], fit.mle$sd[,2])
+  fit.mapN <- apeglm(Y=ase.cts, x=x, log.lik=NULL, param=param, coef=2, mle = mle, log.link=FALSE, method = "betabinCR")
+})
+
+cat("time for apeglm estimation, old package")
+system.time({
+  set.seed(1)
+  theta.hat.0 = 100
+  param <- cbind(theta.hat.0, cts)
+  fit.mle <- apeglm(Y=ase.cts, x=x, log.lik=betabinom.log.lik, param=param, no.shrink=TRUE, log.link=FALSE)
+  theta.hat <- bbEstDisp(success=ase.cts, size=cts, x=x, beta=fit.mle$map, minDisp=1, maxDisp=500)
+  param <- cbind(theta.hat, cts)
+  fit.mle <- apeglm(Y=ase.cts, x=x, log.lik=betabinom.log.lik, param=param, no.shrink=TRUE, log.link=FALSE)
+  theta.hat <- bbEstDisp(success=ase.cts, size=cts, x=x, beta=fit.mle$map, minDisp=1, maxDisp=500)
+  mle <- cbind(fit.mle$map[,2], fit.mle$sd[,2])
+  param <- cbind(theta.hat, cts)
+  fit.mapO <- apeglm(Y=ase.cts, x=x, log.lik=betabinom.log.lik, param=param, coef=2, mle=mle, log.link=FALSE)
+})
+
+ mat = rep(0, 4)
+  for (i in 1:nrow(ase.cts)) mat = rbind(mat, coef(aodModels2[[i]]))
+  aodMle2 = mat[-1,]
+  
+  cat("first few MLEs for aod and apeglm, and first few MAPs for old and new apeglm (in that order)")
+  head(aodMle2)
+  head(fit.mle2$map)
+  head(fit.mapO$map)
+  head(fit.mapN$map)
+```
+
+
+
+
+
+
+
+

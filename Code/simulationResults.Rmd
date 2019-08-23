@@ -1,0 +1,1102 @@
+---
+title: "New SimulationFigures"
+author: "Josh Zitovsky"
+date: "2/8/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(fig.width=10, fig.height=4.5) 
+```
+
+
+```{r processing, echo=F, results='hide', warning=FALSE, message=FALSE}
+#data processing
+library(tidyverse)
+library(apeglm)
+library(emdbook)
+library(ashr)
+library(gridExtra)
+library(dichromat)
+rbetabinom = emdbook::rbetabinom
+dbetabinom = emdbook::dbetabinom
+
+
+data = read_csv("~/Downloads/fullGeccoRnaDump.csv")
+dim(data)
+
+#counting total allele-specific (AS) reads, turning relevant columns numeric
+data2 = data %>%
+  transform(ASE_mat=as.numeric(ASE_mat), ASE_pat=as.numeric(ASE_pat)) %>%
+  mutate(group = substr(sample_id,1,2), ASE_tot=ASE_mat+ASE_pat) %>%
+  filter(!(group %in% c("FF","GG","HH")))
+
+#getting gene by sample matrix of total allele counts
+select=dplyr::select
+cts = data2 %>%
+  select(ensembl_id, sample_id, ASE_tot) %>%
+  spread(sample_id, ASE_tot) 
+
+#getting gene by sample matrix of paternal allele counts
+ase.cts = data2 %>%
+  select(ensembl_id, sample_id, ASE_pat) %>%
+  spread(sample_id, ASE_pat) 
+
+#removing genes with low total allele counts
+goodSamples = function(x) {
+  return(sum(x>=10))
+}
+
+largeSamples = cts %>%
+  select(-ensembl_id) %>%
+  apply(1, goodSamples)
+
+keepGenes = cts$ensembl_id[largeSamples>=3]           #only keep genes if at least three samples have AS counts of 10+ 
+ase.cts = filter(ase.cts, ensembl_id %in% keepGenes)  
+cts = filter(cts, ensembl_id %in% keepGenes)
+
+#counting total AS counts and total paternal counts for each gene
+cts$total = rowSums(cts[,-1])     
+ase.cts$total = rowSums(ase.cts[,-1])
+
+#sample probabilities
+sampleProbs = ase.cts$total/cts$total
+summary(sampleProbs)
+#gene 11834, ENSMUSG00000064377, is the only gene with 0 expression, with 106 out of 106 from father. We will cap estimated probability at the second empirical lowest (with >1000 counts), 0.0007 (1 out of 1429). Median AS counts is 15547, 1st quartile is 3769. 
+```
+
+
+```{r functions, echo=F, results='hide'}
+#creating functions
+#function to get AS reads from inputted cross pair
+processCts = function(groupInp , data2, groupInp2) { #groupInp is the first cross, #groupInp2 is the second cross
+  data3 = data2 %>%
+    filter(group==groupInp | group==groupInp2) %>%                  #only keep samples from inputted cross pair
+    transform(ASE_pat = ifelse(group==groupInp2, ASE_mat, ASE_pat)) #the second cross swaps which strain is the mother and which is the father, and thus ASE_pat and ASE_mat must be switched 
+  
+  #gene x samples matrix of reads from second strain specifically
+  ase.cts2 = data3 %>%                                              
+    select(ensembl_id, sample_id, ASE_pat) %>%
+     spread(sample_id, ASE_pat) 
+  
+  #gene x samples matrix of total allele-specific reads
+  cts2 = data3 %>%
+    select(ensembl_id, sample_id, ASE_tot) %>%
+     spread(sample_id, ASE_tot)
+  
+  #filtering out genes with very low numbers of AS reads
+  largeSamples = cts2 %>%
+    select(-ensembl_id) %>%
+    apply(1, goodSamples)
+  keepGenes = cts2$ensembl_id[largeSamples>=3]
+  ase.cts2 = filter(ase.cts2, ensembl_id %in% keepGenes)
+  cts2 = filter(cts2, ensembl_id %in% keepGenes)
+  
+  #calculating sample proportions of reads mapped to second strain
+  cts2$total = rowSums(cts2[,-1])
+  ase.cts2$total = rowSums(ase.cts2[,-1])
+  sampleProbs = ase.cts2$total/cts2$total
+  
+  return(list(probs=sampleProbs, counts=cts2, allelecounts=ase.cts2))
+}
+
+
+
+
+#function that computes MLE and MAP estimates from the data processed above 
+tooLazyToComeUpWithAGoodTitleForFunction = function(p, maxDispersion=500) {
+  cts=p$counts                           
+  ase.cts=p$allelecounts
+  cts$total=cts$ensembl_id=NULL
+  ase.cts$total=ase.cts$ensembl_id=NULL
+  cts=as.matrix(cts)
+  ase.cts=as.matrix(ase.cts)
+  X=matrix(rep(1,ncol(cts)))
+  theta.hat.0 <- 100 # rough estimate of dispersion
+  param <- cbind(theta.hat.0, cts)
+  
+  fit.mle <- apeglm(Y=ase.cts, x=X, log.lik=NULL, param=param, no.shrink=TRUE, log.link=FALSE, method="betabinC")
+  theta.hat <- bbEstDisp(success=ase.cts, size=cts, x=X, beta=fit.mle$map, minDisp=1, maxDisp=maxDispersion)
+  param <- cbind(theta.hat, cts)
+  fit.mle <- apeglm(Y=ase.cts, x=X, log.lik=NULL, param=param, no.shrink=TRUE, log.link=FALSE, method="betabinCR")
+  theta.hat <- bbEstDisp(success=ase.cts, size=cts, x=X, beta=fit.mle$map, minDisp=1, maxDisp=maxDispersion)
+  param <- cbind(theta.hat, cts)
+  coef <- 1
+  mle <- cbind(fit.mle$map, fit.mle$sd)
+  param <- cbind(theta.hat, cts)
+  fit.map <- apeglm(Y=ase.cts, x=X, log.lik=NULL, param=param, coef=1, mle=mle, log.link=FALSE, method = "betabinCR")
+  return(list(mle=fit.mle,map=fit.map, counts=cts, theta=theta.hat))
+}
+
+
+
+
+#repeating the same thing as above, except this time removing genes with sample allelic proportions of 0 and 1
+processCts2 = function(groupInp, data2, groupInp2) {
+data3 = data2 %>%
+  filter(group==groupInp | group==groupInp2) %>%
+  transform(ASE_pat = ifelse(group==groupInp2, ASE_mat, ASE_pat))
+
+ase.cts2 = data3 %>%
+  select(ensembl_id, sample_id, ASE_pat) %>%
+   spread(sample_id, ASE_pat) 
+
+cts2 = data3 %>%
+  select(ensembl_id, sample_id, ASE_tot) %>%
+   spread(sample_id, ASE_tot)
+
+largeSamples = cts2 %>%
+  select(-ensembl_id) %>%
+  apply(1, goodSamples)
+
+keepGenes = cts2$ensembl_id[largeSamples>=3]
+
+ase.cts2 = filter(ase.cts2, ensembl_id %in% keepGenes)
+cts2 = filter(cts2, ensembl_id %in% keepGenes)
+cts2$total = rowSums(cts2[,-1])
+ase.cts2$total = rowSums(ase.cts2[,-1])
+remove2 = ase.cts2$total>=1 & ase.cts2$total<=cts2$total-1           #keep genes with at least one count for both alleles
+cts2 = cts2[remove2,]
+ase.cts2 = ase.cts2[remove2,]
+sampleProbs = ase.cts2$total/cts2$total
+
+return(list(probs=sampleProbs, counts=cts2, allelecounts=ase.cts2))
+}
+
+
+
+#function that gets mean absolute error and median absolute deviation
+getMAE = function(goal, mle, map, ash, int) {
+return(list(MAEmle = mean(abs(goal[int]-mle[int])),
+           MAEmap = mean(abs(goal[int]-map[int])),
+           MAEash = mean(abs(goal[int]-ash[int]))))
+}
+
+getMAD = function(goal, mle, map, ash, int) {
+return(list(MADmle = median(abs(goal[int]-mle[int])),
+           MADmap = median(abs(goal[int]-map[int])),
+           MADash = median(abs(goal[int]-ash[int]))))
+}
+
+
+
+
+#function for simulating data and fitting models, with inputted beta, overdispersion and subset
+processSimulation = function(seedd, sub, beta, phi=l$theta) {
+set.seed(seedd)
+counts = p$counts[,sub]
+counts = as.matrix(counts)
+rownames(counts) <- seq(length=nrow(counts)) #reseting row names 
+x = rep(c(0,1),length(sub)/2)
+logit = matrix(nrow = length(alleleProbs), ncol = length(sub))
+for (i in 1:length(alleleProbs)) logit[i,] = alleleProbs[i] + beta[i]*x #simlated probs for samples of the ith gene 
+probs = 1/(1+exp(-logit))
+
+simulatedACounts1 = rbetabinom(n = prod(dim(counts)), 
+                               prob = t(probs), 
+                               size = t(counts), 
+                               theta = rep(phi, each=length(sub)))
+simulatedACounts1 = matrix(simulatedACounts1, nrow=nrow(counts), byrow=T)
+
+#fitting MLE, MAP and ash models
+cts = counts
+ase.cts = simulatedACounts1
+X=matrix(c(rep(1,ncol(cts)), x), ncol=2)
+theta.hat.0 <- 100 
+param <- cbind(theta.hat.0, cts)
+
+#two iterations of overdispersion estimation
+fit.mle <- apeglm(Y=ase.cts, x=X, log.lik=NULL, param=param, no.shrink=TRUE, log.link=FALSE, method="betabinC")
+theta.hat <- bbEstDisp(success=ase.cts, size=cts, x=X, beta=fit.mle$map, minDisp=1, maxDisp=500)
+param <- cbind(theta.hat, cts)
+fit.mle <- apeglm(Y=ase.cts, x=X, log.lik=NULL, param=param, no.shrink=TRUE, log.link=FALSE, method="betabinC")
+theta.hat <- bbEstDisp(success=ase.cts, size=cts, x=X, beta=fit.mle$map, minDisp=1, maxDisp=500)
+param <- cbind(theta.hat, cts)
+fit.mle <- apeglm(Y=ase.cts, x=X, log.lik=NULL, param=param, no.shrink=TRUE, log.link=FALSE, method="betabinCR")
+#NOTE: took out 'coef=1' for last two
+
+
+#fitting apeglme model
+mle <- cbind(fit.mle$map[,2], fit.mle$sd[,2])
+fit.map <- apeglm(Y=ase.cts, x=X, log.lik=NULL, param=param, coef=2, mle=mle, log.link=FALSE, method = "betabinCR")
+
+#fitting ash model
+fit.ash = ash(as.vector(fit.mle$map[,2]), as.vector(fit.mle$sd[,2]), method = "shrink")
+
+return(list(truth=beta, mle = fit.mle$map[,2], map=fit.map$map[,2], ashe = fit.ash$result$PosteriorMean, mlesd=fit.mle$sd[,2], mapsd=fit.map$sd[,2], ashsd = fit.ash$result$PosteriorSD, cts = cts, ase.cts=ase.cts, theta = theta.hat, ashresults = fit.ash))
+}
+
+
+
+
+#function to make CAT plot
+plotCat = function(truth,mle,map,ashe) {
+#getting top genes according to each estimate (concordance matrix)
+lfcs = data.frame(truth, mle, map, ashe)
+tops = c(50,100,200,300,400,500)
+mat = matrix(0, nrow = length(tops), ncol = 4)
+for (i in 1:length(tops)) {
+  for (j in 1:4) {
+    mat[i,j] = length(intersect(order(-abs(lfcs$truth))[1:tops[i]],
+                          order(-abs(lfcs[,j]))[1:tops[i]]))/tops[i]
+  }
+}
+concWide = as.data.frame(mat)
+colnames(concWide) = c("truth","mle","map","ashe")
+concWide = cbind(concWide,tops)
+conc = gather(concWide, estimate, concordance, truth:ashe, factor_key=TRUE)
+
+
+#plotting CAT (concordance at top gene)
+cat = ggplot(conc, mapping = aes(x=tops, y=concordance, group=estimate)) +
+  geom_point(aes(color=estimate)) +
+  geom_line(aes(color=estimate)) + 
+  ggtitle(label = "CAT PLOT") + 
+  theme(plot.title = element_text(hjust = 0.5)) + #centers title
+  xlab(label = "number of top genes") 
+return(list(plot=cat, data=conc))
+}
+
+
+
+#get boolean vector indicating which genes have at least a certain number of counts for at least a certain number of samples
+filterIt = function(p, samples, counts) {
+goodSamples2 = function(x) {
+  return(sum(x>=counts))
+}
+
+largeSamples = p$counts %>%
+  select(-c(ensembl_id, total)) %>%
+  apply(1, goodSamples2)
+keepGenes = largeSamples>=samples
+return(keepGenes)
+}
+
+
+
+#plots the effectiveness of different filtering rules (based on input) wrt MLE concordance
+getFilterRule = function(sub, beta, samples, max=200, all=FALSE, load=TRUE, desc, increment=10) {
+avg = vector("double", length(seq(0,max,by=increment)))
+#top10 = vector("double", length(seq(0,200,by=20)))
+#top50 = vector("double", length(seq(0,200,by=20)))
+#top100 = vector("double", length(seq(0,200,by=20)))
+#top500 = vector("double", length(seq(0,200,by=20)))
+j=1
+pSub=list(counts=p$counts[,c(1,sub,26)], allelecounts=p$allelecounts[,c(1,sub,26)])
+for (i in seq(0,max,by=increment)) {
+  if (all==FALSE) {
+    rule = filterIt(pSub, samples, i)
+  } else {
+    rule = pSub$counts$total>i
+  }
+  mle.filter = ifelse(rule, mle, 0)
+  conc = plotCat(truth, mle.filter, map, ashe)$data
+  avg[j] = mean(conc$concordance[conc$estimate=="mle"])
+#  top10[j] = conc$concordance[conc$estimate=="mle" & conc$tops==10]
+#  top50[j] = conc$concordance[conc$estimate=="mle" & conc$tops==50]
+#  top100[j] = conc$concordance[conc$estimate=="mle" & conc$tops==100]
+#  top500[j] = conc$concordance[conc$estimate=="mle" & conc$tops==500]
+  j=j+1
+  if (load==TRUE) print(i)
+}
+mat = cbind(avg, (1:length(avg)-1)*increment)
+ggplot(mapping = aes(y=mat[,1], x=mat[,2])) +
+  geom_point() +
+  geom_line() +
+  xlab(desc) +
+  ylab("average MLE concordance")  +
+  scale_x_continuous(breaks = seq(0,max, by=increment*2))
+}
+
+
+
+#function to make CAT plot with mle.filter
+plotCatF = function(truth,mle,map,ashe, mle.filter) {
+#getting top genes according to each estimate (concordance matrix)
+lfcs = data.frame(truth, mle, map, ashe, mle.filter)
+tops = c(50,100,200,300,400,500)
+mat = matrix(0, nrow = length(tops), ncol = 4)
+for (i in 1:length(tops)) {
+  for (j in 2:5) {
+    mat[i,(j-1)] = length(intersect(order(-abs(lfcs$truth))[1:tops[i]],
+                          order(-abs(lfcs[,j]))[1:tops[i]]))/tops[i]
+  }
+}
+concWide = as.data.frame(mat)
+colnames(concWide) = c("mle","apeglm","ash", "mle.filter")
+concWide = cbind(concWide,tops)
+conc = gather(concWide, estimate, concordance, mle:mle.filter, factor_key=TRUE)
+
+
+#plotting CAT (concordance at top gene)
+cat = ggplot(conc, mapping = aes(x=tops, y=concordance, group=estimate)) +
+  geom_point(aes(color=estimate, shape=estimate)) +
+  geom_line(aes(color=estimate, linetype=estimate)) +
+  xlab(label = "Number of Top Genes") +
+  ylab(label = "Concordance")
+return(list(plot=cat, data=conc))
+}
+```
+
+
+```{r removeSexPOE, echo=F, results='hide'}
+#removing genes with sex and POE effects
+p=processCts2("FH", data2, "HF")
+cts = p$counts[,-c(1,26)] %>%
+  as.matrix() %>%
+  apply(2,as.numeric)
+ase.cts=as.matrix(p$allelecounts[,-c(1,26)])
+samples = colnames(cts)
+sex = substr(samples, nchar(samples),nchar(samples))
+parentSexes = substr(samples, 1, 2)
+male = ifelse(sex=="M",1, 0)
+motherStrainF = ifelse(parentSexes=="FH",1,0)
+  X=matrix(c(rep(1,ncol(cts)),male,motherStrainF,male*motherStrainF),ncol=4)
+  theta.hat.0 <- 100 
+  param <- cbind(theta.hat.0, cts)
+  
+  fit.mle <- apeglm(Y=ase.cts, x=X, log.lik=NULL, param=param, no.shrink=TRUE, log.link=FALSE, method="betabinC")
+  theta.hat <- bbEstDisp(success=ase.cts, size=cts, x=X, beta=fit.mle$map, minDisp=1, maxDisp=500)
+  param <- cbind(theta.hat, cts)
+  fit.mle <- apeglm(Y=ase.cts, x=X, log.lik=NULL, param=param, no.shrink=TRUE, log.link=FALSE, method="betabinC")
+  theta.hat <- bbEstDisp(success=ase.cts, size=cts, x=X, beta=fit.mle$map, minDisp=1, maxDisp=500)
+  param <- cbind(theta.hat, cts)
+  fit.mle <- apeglm(Y=ase.cts, x=X, log.lik=NULL, param=param, no.shrink=TRUE, log.link=FALSE, method="betabinCR")
+  
+  significantSex = abs(fit.mle$map[,2])-1.645*fit.mle$sd[,2]>0
+  significantParent = abs(fit.mle$map[,3])-1.645*fit.mle$sd[,3]>0
+  significantInteract = abs(fit.mle$map[,4])-1.645*fit.mle$sd[,4]>0
+  removeGene = ifelse(significantSex+significantParent+significantInteract>0,1,0)
+  p$counts=p$counts[!removeGene,]
+  p$allelecounts=p$allelecounts[!removeGene,]
+  
+  alleleProbs = p$allelecounts$total/p$counts$total
+  l = tooLazyToComeUpWithAGoodTitleForFunction(p)
+```
+
+# Normal Simulation
+
+```{r normalSim, echo=F, results='hide'}
+set.seed(2395)
+sub = c(2,3,5,6,14,15,20,21)
+beta = rnorm(nrow(p$counts))
+s = processSimulation(2395, sub, beta)
+
+truth = s$truth
+mle = s$mle
+map = s$map
+ashe = s$ashe
+ashresults = s$ashresults
+mlesd = s$mlesd
+mapsd = s$mapsd
+ashsd = s$ashsd
+cts = s$cts
+ase.cts=s$ase.cts
+shrink = abs(map-mle)
+shrinkash = abs(ashe-mle)
+shrunk = abs(map-mle)>0.1
+shrunkash = abs(ashe-mle)>0.1
+improve = abs(truth-mle)-abs(truth-map)
+improveash = abs(truth-mle)-abs(truth-ashe)
+pSub=list(counts=p$counts[,c(1,sub,26)], allelecounts=p$allelecounts[,c(1,sub,26)])
+```
+
+## Summary Statistics for Normal Simulation
+
+```{r griAshNromal, message=FALSE, results='hide', warning=FALSE, echo=FALSE}
+#CIgrid = ashci(ashresults)
+#saveRDS(object = CIgrid, file = "~/Desktop/CIgridNormal.rds")
+CIgrid = readRDS("~/Desktop/CIgridNormal.rds")
+```
+
+```{r summaryNormal, echo=F}
+#shrink statistics
+cat("number of shrunk (shrinkage>0.1) apeglm estimates\n")
+sum(shrunk)                                             
+cat("number of shrunk (shrinkage>0.1) ash estimates\n")
+sum(shrunkash)   
+cat("quantiles of shrinkage for apeglm (top) and ash (bottom) \n")
+round(quantile(shrink, prob=c(.5,.75,.9,.95,.975,.99,.995, 1)),3) 
+round(quantile(shrinkash, prob=c(.5,.75,.9,.95,.975,.99,.995, 1)), 3) #ash has universally greater shrinkage
+cat("Paired t-tet of shrink scores \n")
+t.test(shrinkash, shrink, paired=T, conf.int=0.95)
+
+#Mean absolute error
+cat("Mean absolute error\n")
+getMAE(goal = truth, mle = mle, map = map, ash = ashe, int = TRUE)
+cat("MAE for genes shrunk by apeglm (recall we define shrunk as >0.1 shrinkage)\n")
+getMAE(goal = truth, mle = mle, map = map, ash = ashe, int = shrunk)
+cat("MAE for genes shrunk by ash\n")
+getMAE(goal = truth, mle = mle, map = map, ash = ashe, int = shrunkash) 
+cat("MAE for large effect sizes, or abs(truth)>2\n")
+getMAE(goal = truth, mle = mle, map = map, ash = ashe, int = abs(truth)>2)
+
+#Interval Coverage and width
+truemleCI = truth>=mle-1.96*mlesd & truth<=mle+1.96*mlesd
+truemapCI = truth>=map-1.96*mapsd & truth<=map+1.96*mapsd
+trueashCI = truth>=ashe-1.96*ashsd &truth<=ashe+1.96*ashsd
+trueashCIGrid = truth>=CIgrid[,1] &truth<=CIgrid[,2]
+cat("proportion of times true effects were in the 95% confidence intervals for MLE, MAP, ash (normal-based) and ash (grid-based) (in that order) \n")
+sum(truemleCI)/length(truemleCI)
+sum(truemapCI)/length(truemapCI)
+sum(trueashCI)/length(trueashCI)
+sum(trueashCIGrid)/length(trueashCIGrid)
+cat("summary statistics of standard errors of MLE, MAP and ash estimates (in that order) \n")
+summary(mlesd); summary(mapsd); summary(ashsd) #similar accuracy and width
+cat("interval width for ash (grid-based) \n")
+mean(CIgrid[,2]-CIgrid[,1])
+```
+
+We can see that some apeglm-only severely shrunk genes are shrunk almsot the same amount by ash. Thus, we will only color apeglm-old shrunk genes separately if ash shrinkage is at least 0.1 less, and similarly for coloring ash-only shrunk genes. 
+```{r shrinkNormal, echo=F}
+cat("minimum ash shrinkage among genes shrunk by apeglm and not ash\n")
+min(shrinkash[shrunk&!shrunkash])
+cat("maximum shrinkage difference between apeglm and ash among genes shrunk by apeglm and not ash\n")
+max((shrink-shrinkash)[shrunk&!shrunkash])
+cond1 = shrink>pmax(1,mle/4)
+cond2 = shrinkash>pmax(1,mle/4)
+cat("apeglm and ash shrinkage for gene only severely shrunk by apeglm\n")
+shrink[cond1&!cond2]
+shrinkash[cond1&!cond2]
+cat("apeglm shrinkage for genes only severely shrunk by ash\n")
+shrink[cond2&!cond1]
+```
+
+
+## Largest Interval table
+```{r}
+tenthLargest = -sort(desc(mlesd))[10]
+largest = which(mlesd>=tenthLargest)
+
+truthVec = vector("double", 10)
+mleVec = vector("double", 10)
+mapVec = vector("double", 10)
+ashVec = vector("double", 10)
+for (i in 1:length(largest)) {
+truthVec[i] = round(truth[largest[[i]]],3)
+mleVec[i] = paste("(", round(mle[largest[i]]-1.96*mlesd[largest[1]],3), ", ", round(mle[largest[i]]+1.96*mlesd[largest[1]],3), ")", sep='')
+mapVec[i] = paste("(", round(map[largest[i]]-1.96*mapsd[largest[1]],3), ", ", round(map[largest[i]]+1.96*mapsd[largest[1]],3), ")", sep='')
+ashVec[i] = paste("(", CIgrid[,1][largest[i]], ", ", CIgrid[,2][largest[i]], ")", sep='')
+}
+largestInts = data.frame(Truth=truthVec, MLE=mleVec, Apeglm=mapVec, Ash=ashVec)
+print(xtable::xtable(largestInts),include.rownames=FALSE)
+largestInts
+```
+
+## MA Plot for Normal Simulation
+```{r MANormal, echo=F}
+totalCounts = rowSums(cts)
+logCounts = log(totalCounts+1)
+
+MAplot1 = ggplot(mapping=aes(x=logCounts, y=mle)) +
+  geom_point(color= "#E0E0E0") + 
+  geom_point(mapping = aes(color="Shrunk by Ash Only", x=logCounts[shrinkash>.1&shrink<=.1], y=mle[shrinkash>.1&shrink<=.1])) +
+  geom_point(mapping = aes(x=logCounts[shrink>.1&shrinkash>.1], y=mle[shrink>.1&shrinkash>.1], color="Shrunk by Both")) +
+  geom_point(mapping = aes(color="Shrunk by Apeglm Only", x=logCounts[shrink>.1&shrinkash<=.1], y=mle[shrink>.1&shrinkash<=.1])) +
+  scale_x_continuous(breaks = seq(from=0,to=13,by=2)) +
+  ylab("MLE") +
+  xlab("Log of Summed Counts") +
+  scale_color_manual(name="Colors", values = c(`Shrunk by Apeglm Only`="#0000FF", `Shrunk by Ash Only`="#E69F00", `Shrunk by Both`="#009E73")) +
+  theme_minimal() +
+  ggtitle(label = "a)")
+
+cond1 = shrink>pmax(1,mle/4) & shrinkash<=pmax(1,mle/4)  & abs(shrinkash-shrink)>.1 #only shrunk by apeglm, and diff <.1
+cond2 = shrinkash>pmax(1,mle/4) & shrink<=pmax(1,mle/4) & abs(shrinkash-shrink)>.1  #only shrunk by ash, and diff <.1
+cond3 = (shrinkash>pmax(1,mle/4) & shrink>pmax(1,mle/4)) | ((shrinkash>pmax(1,mle/4) | shrink>pmax(1,mle/4)) & abs(shrinkash-shrink)<.1) #shrunk by both, or shrunk by one and diff <.1
+MAplot2 = ggplot(mapping=aes(x=logCounts, y=mle)) +
+  geom_point(color = "#E0E0E0") + 
+  geom_point(mapping = aes(color="Severely Shrunk by Ash Only", x=logCounts[cond2], y=mle[cond2])) +
+  geom_point(mapping = aes(x=logCounts[cond3], y=mle[cond3], color="Severely Shrunk by Both")) +
+  geom_point(mapping = aes(x=logCounts[cond1], y=mle[cond1], color="Severely Shrunk by Apeglm Only")) +
+  scale_color_manual(name="Colors", values = c(`Severely Shrunk by Apeglm Only` = "#0000FF", `Severely Shrunk by Ash Only`="#E69F00", `Severely Shrunk by Both`="#009E73")) +
+    scale_x_continuous(breaks = seq(from=0,to=13,by=2)) +
+  ylab("MLE") +
+  xlab("Log of Summed Counts") +
+  theme_minimal() +
+  ggtitle(label = "b)") 
+
+MAplots = cowplot::plot_grid(MAplot1, MAplot2, align = "hv", ncol=1) + 
+  ggsave(device = "eps", filename ="~/Desktop/ResultsLove/PaperPlots/MAplotsNormal.eps") +
+  ggsave("~/Desktop/ResultsLove/PaperPlots/MAplotsNormal.png")
+plot(MAplots)
+```
+
+
+
+
+## Filtering
+
+```{r filterNormal, echo=F, results = 'hide'}
+#looking at half samples, full samples, or total count filtering
+getFilterRule(sub, beta, 4, load=FALSE, desc="filtering rule: genes with less than this many counts for half the samples removed")
+getFilterRule(sub, beta, 8, load=FALSE, max=100, desc="filtering rule: genes with less than this many counts for all the samples removed")
+getFilterRule(sub, beta, 4, max=1000, all=TRUE, load=FALSE, increment = 50, desc="filtering rule: genes with less than this many total counts removed")
+
+
+filterRule0 = filterIt(pSub, 4, 40)
+filterRuleN1 = filterIt(pSub, 8, 20)
+filterRuleN2 = pSub$counts$total>620
+
+filterRule1 = filterIt(pSub, 4, 30)
+filterRule2 = filterIt(pSub, 8, 10)
+filterRule3 = pSub$counts$total>350
+filterRule4 = pSub$counts$total>650
+
+conc1 = plotCat(truth = truth, mle = ifelse(filterRule1, mle, 0), map = map, ashe = ashe)$data
+conc2 = plotCat(truth = truth, mle = ifelse(filterRule2, mle, 0), map = map, ashe = ashe)$data
+conc3 = plotCat(truth = truth, mle = ifelse(filterRule3, mle, 0), map = map, ashe =  ashe)$data
+conc4 = plotCat(truth = truth, mle = ifelse(filterRule4, mle, 0), map = map, ashe = ashe)$data
+#concN2 = plotCat(truth = truth, mle = ifelse(filterRuleN2, mle, 0), map = map, ashe = ashe)$data
+cat("filter rule 1 (>30 each for half), mean concordance and number of genes removed \n")
+mean(conc1$concordance[conc1$estimate=="mle"]); sum(filterRule1)
+cat("filter rule 2: >10 for all \n")
+mean(conc2$concordance[conc2$estimate=="mle"]); sum(filterRule2)
+cat("filter rule 3: >350 for sum \n")
+mean(conc3$concordance[conc3$estimate=="mle"]); sum(filterRule3)
+cat("filter rule 4: >450 for sum \n")
+mean(conc4$concordance[conc4$estimate=="mle"]); sum(filterRule4)
+# cat("filter rule N2\n")
+# mean(concN2$concordance[concN2$estimate=="mle"]); sum(filterRuleN2)
+
+mle.filter = ifelse(filterRule3, mle, 0)
+```
+
+## Truth vs. Estimate Plot for MLE after Filtering, for Normal Simulation
+```{r tveNormal, echo=F}
+tveFilter = ggplot(mapping = aes(y=mle[filterRule3], x=truth[filterRule3])) +
+  geom_point() + 
+  geom_abline(intercept=0,slope=1, color="#FF0000") +
+  xlab("True Effects after Filtering") +
+  ylab("MLE after Filtering") + 
+  theme_minimal() +
+  ggsave(device = "eps", filename ="~/Desktop/ResultsLove/PaperPlots/tveAfterFilter.eps", width = 10, height = 4.5) +
+  ggsave("~/Desktop/ResultsLove/PaperPlots/tveAfterFilter.png", width = 10, height = 4.5)
+
+print(tveFilter)
+```
+
+
+
+## Main Figure
+
+```{r figNormal, echo=F}
+cond1 = shrink>pmax(1,mle/4) & shrinkash<=pmax(1,mle/4)  & abs(shrinkash-shrink)>.1 #only shrunk by apeglm, and diff >.1
+cond2 = shrinkash>pmax(1,mle/4) & shrink<=pmax(1,mle/4) & abs(shrinkash-shrink)>.1  #only shrunk by ash, and diff >.1
+cond3 = (shrinkash>pmax(1,mle/4) & shrink>pmax(1,mle/4)) | ((shrinkash>pmax(1,mle/4) | shrink>pmax(1,mle/4)) & abs(shrinkash-shrink)<.1) #shrunk by both, or shrunk by one and diff <.1
+
+#truth vs. MLE
+tveMle = ggplot(mapping = aes(x = truth, y = mle)) + 
+  geom_point(color = "#E0E0E0") +
+  geom_point(mapping=aes(x=truth[cond2], y=mle[cond2]), color="#E69F00") +
+  geom_point(mapping=aes(x=truth[cond3], y=mle[cond3]), color="#009E73") +
+  geom_point(mapping=aes(x=truth[cond1], y=mle[cond1]), color="#0000FF") +
+  geom_abline(intercept=0, slope=1, color="#000000") +
+  scale_y_continuous(limits = c(min(mle),max(mle))) +
+  theme_minimal() +
+  xlab("True Effect") + 
+  ylab("MLE") +
+  ggtitle(label = "a)") 
+
+#truth vs. apeglm
+tveApeglm = ggplot(mapping = aes(x = truth, y = map)) + 
+  geom_point(color = "#E0E0E0") +
+  geom_point(mapping=aes(x=truth[cond2], y=map[cond2]), color="#E69F00") +
+  geom_point(mapping=aes(x=truth[cond3], y=map[cond3]), color="#009E73") +
+  geom_point(mapping=aes(x=truth[cond1], y=map[cond1]), color="#0000FF") +
+  geom_abline(intercept=0, slope=1, color="#000000") +
+  scale_y_continuous(limits = c(min(mle),max(mle))) +
+  theme_minimal() +
+  xlab("True Effect") + 
+  ylab("apeglm") +
+  ggtitle(label = "b)")
+
+#truth vs. ash
+tveAsh = ggplot(mapping = aes(x = truth, y = ashe)) + 
+  geom_point(color = "#E0E0E0") +
+  geom_abline(intercept=0, slope=1, color=dichromat("#000000")) +
+  geom_point(mapping=aes(x=truth[cond2], y=ashe[cond2]), color="#E69F00") +
+  geom_point(mapping=aes(x=truth[cond3], y=ashe[cond3]), color="#009E73") +
+  geom_point(mapping=aes(x=truth[cond1], y=ashe[cond1]), color="#0000FF") +
+  scale_y_continuous(limits = c(min(mle),max(mle))) +
+  theme_minimal() +
+  xlab("True Effect") + 
+  ylab("ash") +
+  ggtitle(label = "c)")
+
+#CAT plot
+lfcs = data.frame(truth, mle, map, mle.filter, ashe)
+tops = c(50,100,200,300,400,500)
+mat = matrix(0, nrow = length(tops), ncol = 4)
+for (i in 1:length(tops)) {
+  for (j in 2:5) {
+    mat[i,(j-1)] = length(intersect(order(-abs(lfcs$truth))[1:tops[i]],
+                          order(-abs(lfcs[,j]))[1:tops[i]]))/tops[i]
+  }
+}
+concWide = as.data.frame(mat)
+colnames(concWide) = c("mle","apeglm", "mle.filter", "ash")
+concWide = cbind(concWide,tops)
+conc = gather(concWide, estimate, concordance, mle:ash, factor_key=TRUE)
+
+
+#plotting CAT (concordance at top gene)
+catPlot = ggplot(conc, mapping = aes(x=tops, y=concordance, group=estimate)) +
+  geom_point(aes(color=estimate, shape=estimate)) +
+  geom_line(aes(color=estimate, linetype=estimate)) +
+  xlab(label = "Number of Top Genes") +
+  ylab(label = "Concordance") +
+  ggtitle(label="d)") + 
+  scale_color_manual(values = c("#000000", "#0000FF", "#FF00FF", "#E69F00")) +
+  scale_shape_manual(values=c(19,19,19,19)) +
+  scale_linetype_manual(values=c(1,1,1,1)) +
+  theme_minimal() 
+
+grid.arrange(tveMle, tveApeglm, tveAsh, catPlot)
+fig = arrangeGrob(tveMle, tveApeglm, tveAsh, catPlot) 
+ggsave(device = "eps", filename ="~/Desktop/ResultsLove/PaperPlots/normalFigure.eps", fig)
+ggsave(filename ="~/Desktop/ResultsLove/PaperPlots/normalFigure.png", fig)
+```
+
+
+## How our Figure Looks to the Color-Blinded
+I used the `dichromat` package to simulate how our plot would look for those who suffer from deutreranopia. the most common color-blindness. The plot would look similar for those with protanopia.
+
+```{r colorblindFigNormal, echo=F}
+cond1 = shrink>pmax(1,mle/4) & shrinkash<=pmax(1,mle/4)  & abs(shrinkash-shrink)>.1 #only shrunk by apeglm, and diff >.1
+cond2 = shrinkash>pmax(1,mle/4) & shrink<=pmax(1,mle/4) & abs(shrinkash-shrink)>.1  #only shrunk by ash, and diff >.1
+cond3 = (shrinkash>pmax(1,mle/4) & shrink>pmax(1,mle/4)) | ((shrinkash>pmax(1,mle/4) | shrink>pmax(1,mle/4)) & abs(shrinkash-shrink)<.1) #shrunk by both, or shrunk by one and diff <.1
+
+col1="#E69F00"
+col2="#009E73"
+col3="#0000FF"
+col0="#E0E0E0"
+col4="#000000"
+col5="#FF00FF"
+tveMle = ggplot(mapping = aes(x = truth, y = mle)) + 
+  geom_point(color=dichromat(col0)) +
+  geom_point(mapping=aes(x=truth[cond2], y=mle[cond2]), color=dichromat(col1)) +
+  geom_point(mapping=aes(x=truth[cond3], y=mle[cond3]), color=dichromat(col2)) +
+  geom_point(mapping=aes(x=truth[cond1], y=mle[cond1]), color=dichromat(col3)) +
+  geom_abline(intercept=0, slope=1, color="#000000") +
+  scale_y_continuous(limits = c(min(mle),max(mle))) +
+  theme_minimal() +
+  xlab("True Effect") + 
+  ylab("MLE") +
+  ggtitle(label = "a)") 
+
+tveApeglm = ggplot(mapping = aes(x = truth, y = map)) + 
+  geom_point(color=dichromat(col0)) +
+  geom_point(mapping=aes(x=truth[cond2], y=map[cond2]), color=dichromat(col1)) +
+  geom_point(mapping=aes(x=truth[cond3], y=map[cond3]), color=dichromat(col2)) +
+  geom_point(mapping=aes(x=truth[cond1], y=map[cond1]), color=dichromat(col3)) +
+  geom_abline(intercept=0, slope=1, color="#000000") +
+  scale_y_continuous(limits = c(min(mle),max(mle))) +
+  theme_minimal() +
+  xlab("True Effect") + 
+  ylab("apeglm") +
+  ggtitle(label = "b)")
+
+tveAsh = ggplot(mapping = aes(x = truth, y = ashe)) + 
+  geom_point(color=dichromat(col0)) +
+  geom_abline(intercept=0, slope=1, color=dichromat("#000000")) +
+  geom_point(mapping=aes(x=truth[cond2], y=ashe[cond2]), color=dichromat(col1)) +
+  geom_point(mapping=aes(x=truth[cond3], y=ashe[cond3]), color=dichromat(col2)) +
+  geom_point(mapping=aes(x=truth[cond1], y=ashe[cond1]), color=dichromat(col3)) +
+  scale_y_continuous(limits = c(min(mle),max(mle))) +
+  theme_minimal() +
+  xlab("True Effect") + 
+  ylab("ash") +
+  ggtitle(label = "c)")
+
+catPlot = plotCatF(truth = truth, mle, map, ashe, mle.filter)$plot +
+  ggtitle(label="d)") + 
+  scale_color_manual(values = dichromat(c(col4, col3, col1, col5))) +
+  scale_shape_manual(values = c(19,19,19,19)) +
+  scale_linetype_manual(values = c(1,1,1,1)) +
+  theme_minimal()
+
+grid.arrange(tveMle, tveApeglm, tveAsh, catPlot)
+fig = arrangeGrob(tveMle, tveApeglm, tveAsh, catPlot) 
+ggsave(device = "eps", filename ="~/Desktop/ResultsLove/PaperPlots/normalFigureColorblinded.eps", fig)
+ggsave(filename ="~/Desktop/ResultsLove/PaperPlots/normalFigureColorblinded.png", fig)
+```
+
+# Student T Simulation
+
+```{r studentSim, echo=F}
+#smaller overdispersions and t-distributed effects with smaller variance and heavier tails
+set.seed(2395)
+sub = c(2,3,5,6,14,15,20,21)
+beta = rt(nrow(p$counts), df=3)/10
+disp1 = 1+rexp(nrow(p$counts), 1/89) #empirical parameter would be 1/179
+mixProp = 0.5                        #empirical parameter would be 0.3
+phi = vector("double", nrow(p$counts))
+for (i in 1:length(phi)) phi[i] = sample(c(disp1[i], 500), prob = c(mixProp, 1-mixProp), size = 1) 
+
+s = processSimulation(2395, sub, beta, phi)
+truth = s$truth
+mle = s$mle
+mlesd = s$mlesd
+mapsd = s$mapsd
+ashsd = s$ashsd
+map = s$map
+ashe = s$ashe
+cts = s$cts
+ashresults = s$ashresults
+shrink = abs(map-mle)
+shrinkash = abs(ashe-mle)
+shrunk = abs(map-mle)>0.1
+shrunkash = abs(ashe-mle)>0.1
+improve = abs(truth-mle)-abs(truth-map)
+improveash = abs(truth-mle)-abs(truth-ashe)
+pSub=list(counts=p$counts[,c(1,sub,26)], allelecounts=p$allelecounts[,c(1,sub,26)])
+
+#write.csv(map, "~/Desktop/studentTmap.csv")
+#write.csv(mapsd, "~/Desktop/studentTsd.csv")
+```
+
+## Summary Statistics for Student T Simulation
+
+```{r gridAshStudent, message=FALSE, results='hide', warning=FALSE, echo=FALSE}
+#CIgrid = ashci(ashresults)
+#saveRDS(CIgrid, "~/Desktop/CIgridStudent")
+CIgrid = readRDS("~/Desktop/CIgridStudent")
+```
+
+```{r summaryStudent, echo=F}
+#shrink statistics
+cat("number of shrunk (shrinkage>0.1) apeglm estimates\n")
+sum(shrunk)                                             
+cat("number of shrunk (shrinkage>0.1) ash estimates\n")
+sum(shrunkash)   
+cat("quantiles of shrinkage for apeglm (top) and ash (bottom) \n")
+round(quantile(shrink, prob=c(.5,.75,.9,.95,.975,.99,.995, 1)),3) 
+round(quantile(shrinkash, prob=c(.5,.75,.9,.95,.975,.99,.995, 1)), 3) #ash has universally greater shrinkage
+cat("Paired t-tet of shrink scores \n")
+t.test(shrinkash, shrink, paired=T, conf.int=0.95)
+
+#Mean absolute error
+cat("Mean absolute error\n")
+getMAE(goal = truth, mle = mle, map = map, ash = ashe, int = TRUE)
+cat("MAE for genes shrunk by apeglm (recall we define shrunk as >0.1 shrinkage)\n")
+getMAE(goal = truth, mle = mle, map = map, ash = ashe, int = shrunk)
+cat("MAE for genes shrunk by ash\n")
+getMAE(goal = truth, mle = mle, map = map, ash = ashe, int = shrunkash) 
+cat("MAE for large effect sizes, or abs(truth)>2\n")
+getMAE(goal = truth, mle = mle, map = map, ash = ashe, int = abs(truth)>2)
+
+#Interval Coverage and width
+truemleCI = truth>=mle-1.96*mlesd & truth<=mle+1.96*mlesd
+truemapCI = truth>=map-1.96*mapsd & truth<=map+1.96*mapsd
+trueashCI = truth>=ashe-1.96*ashsd &truth<=ashe+1.96*ashsd
+trueashCIGrid = truth>=CIgrid[,1] &truth<=CIgrid[,2]
+cat("proportion of times true effects were in the 95% confidence intervals for MLE, MAP, ash (normal-based) and ash (grid-based) (in that order) \n")
+sum(truemleCI)/length(truemleCI)
+sum(truemapCI)/length(truemapCI)
+sum(trueashCI)/length(trueashCI)
+sum(trueashCIGrid)/length(trueashCIGrid)
+cat("summary statistics of standard errors of MLE, MAP and ash estimates (in that order) \n")
+summary(mlesd); summary(mapsd); summary(ashsd) #similar accuracy and width
+cat("interval width for ash (grid-based) \n")
+mean(2*1.96*ashsd)
+mean(CIgrid[,2]-CIgrid[,1])
+```
+
+We can see that apeglm-only shrunk genes are practically shrunk by the same amount in ash, and thus will not be colored separately
+```{r shrinkStudent, echo=F}
+cond1 = shrink>pmax(1,mle/4) 
+cond2 = shrinkash>pmax(1,mle/4)
+
+cat("minimum ash shrinkage among genes shrunk by apeglm and not ash\n")
+min(shrinkash[shrunk&!shrunkash])
+cat("maximum shrinkage difference between apeglm and ash among genes shrunk by apeglm and not ash\n")
+max((shrink-shrinkash)[shrunk&!shrunkash])
+cat("apeglm and ash shrinkage among the first 20 genes shrunk by only ash")
+head(shrink[shrunkash&!shrunk],20)
+head(shrinkash[shrunkash&!shrunk],20)
+cat("apeglm and ash shrinkage among genes severely shrunk by only ash\n")
+shrink[cond2&!cond1]
+shrinkash[cond2&!cond1]
+cat("apeglm and ash shrinkage among genes severely shrunk by only apeglm\n")
+shrink[cond1&!cond2]
+shrinkash[cond1&!cond2]
+cat("maximum shrinkage difference between apeglm and ash among genes severely shrunk by only apeglm\n")
+max(abs(shrink-shrinkash)[cond1&!cond2])
+```
+
+## Distribution of Overdispersion from Mouse and Effects from Student T Simulation
+```{r supplimentaryStudent, echo=F, warning=FALSE, message=FALSE}
+
+myexp = function(x, myrate, multiplier) {
+  return (dexp(x, rate = myrate)*multiplier)
+}
+
+ggplot(mapping=aes(x=l$theta)) +
+  geom_histogram(color="#FF0000", fill="white", breaks = seq(0,500,by=25), aes(y=..density..)) +
+  stat_function(fun=myexp, mapping = aes(color="Exponential Density w/ Rate=179"), args=list(myrate=1/(mean(l$theta[l$theta<498])), multiplier=mean(l$theta<498))) +
+  coord_cartesian(ylim=c(0,0.0025)) +
+  scale_color_manual(name="Curves", values = c(`Exponential Density w/ Rate=179`="#000000")) +
+  ylab("Density") +
+  xlab("Overdispersion Parameter") +
+  theme_minimal() +
+  ggsave(device = "eps", filename ="~/Desktop/ResultsLove/PaperPlots/phi500Dens.eps", width = 10, height = 4.5) +
+  ggsave("~/Desktop/ResultsLove/PaperPlots/phi500Dens.png", width = 10, height = 4.5)
+
+
+#histogram of simulated effects
+require(scales) # trans_new() is in the scales library
+log2p_trans = function() trans_new("log2p", function(x) log2(x+1), function(x) log2(x+1))
+
+ggplot(mapping = aes(x=beta)) + 
+  geom_histogram(fill="white",color="#FF0000", center=0, binwidth=0.25) + 
+  scale_y_continuous(breaks = c(6000, 1500, 400, 100, 25, 6, 1)) + 
+  scale_x_continuous(breaks = seq(from=-2, to=5, by=.5)) + 
+  xlab("Simulated Effect Size") +
+  ylab("Frequency")  +
+  coord_trans(y = "log2p") +
+  theme_minimal() +
+  ggsave(device = "eps", filename ="~/Desktop/ResultsLove/PaperPlots/simulatedBeta.eps", width = 10, height = 4.5) +
+  ggsave("~/Desktop/ResultsLove/PaperPlots/simulatedBeta.png", width = 10, height = 4.5)
+```
+
+
+
+## Filtering for Student's T Simulation
+Again, the optimal filtering rule is now completely different.
+```{r filterStudent, echo=F}
+#looking at half samples, full samples, or total count filtering
+getFilterRule(sub, beta, 4, load=FALSE, desc="filtering rule: genes with less than this many counts for half the samples removed")
+getFilterRule(sub, beta, 8, load=FALSE, max=100, desc="filtering rule: genes with less than this many counts for all the samples removed")
+getFilterRule(sub, beta, 4, max=1000, increment = 50, all=TRUE, load=FALSE, desc="filtering rule: genes with less than this many counts combined removed")
+#no optimal filtering exists
+
+
+filterRule1 = filterIt(pSub, 4, 20)
+filterRule2 = filterIt(pSub, 4, 110)
+filterRule3 = filterIt(pSub, 8, 20)
+filterRule4 = filterIt(pSub, 8, 40)
+filterRule5 = pSub$counts$total>600
+filterRule6 = pSub$counts$total>750
+
+length(filterRule1)
+conc1 = plotCat(truth = truth, mle = ifelse(filterRule1, mle, 0), map = map, ashe = ashe)$data
+conc2 = plotCat(truth = truth, mle = ifelse(filterRule2, mle, 0), map = map, ashe = ashe)$data
+conc3 = plotCat(truth = truth, mle = ifelse(filterRule3, mle, 0), map = map, ashe =  ashe)$data
+conc4 = plotCat(truth = truth, mle = ifelse(filterRule4, mle, 0), map = map, ashe = ashe)$data
+conc5 = plotCat(truth = truth, mle = ifelse(filterRule5, mle, 0), map = map, ashe = ashe)$data
+conc6 = plotCat(truth = truth, mle = ifelse(filterRule6, mle, 0), map = map, ashe = ashe)$data
+
+cat("filter rule 1 (>20 for half), mean concordance and number of genes after filtering \n")
+mean(conc1$concordance[conc1$estimate=="mle"]); sum(filterRule1)
+cat("filter rule 2: >40 for half \n")
+mean(conc2$concordance[conc2$estimate=="mle"]); sum(filterRule2)
+cat("filter rule 3: >20 for all \n")
+mean(conc3$concordance[conc3$estimate=="mle"]); sum(filterRule3)
+cat("filter rule 4: >40 for all \n")
+mean(conc4$concordance[conc4$estimate=="mle"]); sum(filterRule4)
+cat("filter rule 5: sum >600 \n")
+mean(conc5$concordance[conc5$estimate=="mle"]); sum(filterRule5)
+cat("filter rule 6: sum >750 \n")
+mean(conc6$concordance[conc6$estimate=="mle"]); sum(filterRule6)
+
+mle.filter = ifelse(filterRule2, mle, 0)
+```
+
+
+
+## Main Figure for Student's T Simulation
+
+The truth vs. estimate plots look different. We can see here that ash shrunk the gene that was truly largest to zero. In the previous analysis, when higher tolerance was used, ash did not shrink any truly large effects away from the trurth. 
+```{r figStudent, echo=F}
+cond1 = shrink>pmax(1,mle/4) 
+cond2 = shrinkash>pmax(1,mle/4) 
+cond3 = cond1 & cond2
+
+tveMle = ggplot(mapping = aes(x = truth, y = mle)) + 
+  geom_point(color="#E0E0E0") +
+  geom_point(mapping=aes(x=truth[cond3], y=mle[cond3]), color="#009E73") +
+  geom_point(mapping=aes(x=truth[cond2&!cond1], y=mle[cond2&!cond1]), color="#E69F00") +
+  geom_abline(intercept=0, slope=1, color="#000000") +
+  scale_y_continuous(limits = c(-max(abs(mle)),max(abs(mle))), breaks = seq(-4,4, by=4)) +
+  theme_minimal() +
+  xlab("True Effect") + 
+  ylab("MLE") +
+  ggtitle(label = "a)") 
+
+tveApeglm = ggplot(mapping = aes(x = truth, y = map)) + 
+  geom_point(color="#E0E0E0") +
+  geom_point(mapping=aes(x=truth[cond3], y=map[cond3]), color="#009E73") +
+  geom_point(mapping=aes(x=truth[cond2&!cond1], y=map[cond2&!cond1]), color="#E69F00") +
+  geom_abline(intercept=0, slope=1, color="#000000") +
+  scale_y_continuous(limits = c(-max(abs(mle)),max(abs(mle))), breaks = seq(-4,4, by=4)) +
+  theme_minimal() +
+  xlab("True Effect") + 
+  ylab("apeglm") +
+  ggtitle(label = "b)")
+
+tveAsh = ggplot(mapping = aes(x = truth, y = ashe)) + 
+  geom_point(color="#E0E0E0") +
+  geom_abline(intercept=0, slope=1, color="#000000") +
+  geom_point(mapping=aes(x=truth[cond3], y=ashe[cond3]), color="#009E73") +
+  geom_point(mapping=aes(x=truth[cond2&!cond1], y=ashe[cond2&!cond1]), color="#E69F00") +
+  scale_y_continuous(limits = c(-max(abs(mle)),max(abs(mle))), breaks = seq(-4,4, by=4)) +
+  theme_minimal() +
+  xlab("True Effect") + 
+  ylab("ash") +
+  ggtitle(label = "c)")
+
+catPlot = plotCatF(truth = truth, mle, map, ashe, mle.filter)$plot +
+  ggtitle(label="d)") + 
+  scale_color_manual(values = c("#000000", "#0000FF", "#E69F00", "#FF00FF"))  +
+  scale_shape_manual(values=c(19,19,19,19)) +
+  scale_linetype_manual(values=c(1,1,1,1)) +
+  theme_minimal()
+
+grid.arrange(tveMle, tveApeglm, tveAsh, catPlot)
+fig = arrangeGrob(tveMle, tveApeglm, tveAsh, catPlot) 
+ggsave(device = "eps", filename ="~/Desktop/ResultsLove/PaperPlots/studentTFigure.eps", fig) 
+ggsave("~/Desktop/ResultsLove/PaperPlots/studentTFigure.png", fig)
+```
+
+# How our Figure Looks to the Color-Blinded
+
+```{r colorblindFigStudent, echo=F}
+cond1 = shrink>pmax(1,mle/4) & abs(shrinkash-shrink)>.1
+cond2 = shrinkash>pmax(1,mle/4) & abs(shrinkash-shrink)>.1
+cond3 = (shrinkash>pmax(1,mle/4) | shrink>pmax(1,mle/4)) & !cond1 & !cond2
+
+tveMle = ggplot(mapping = aes(x = truth, y = mle)) + 
+  geom_point(color=dichromat("#E0E0E0")) +
+  geom_point(mapping=aes(x=truth[cond3], y=mle[cond3]), color=dichromat("#009E73")) +
+  geom_point(mapping=aes(x=truth[cond2&!cond1], y=mle[cond2&!cond1]), color=dichromat("#E69F00")) +
+  geom_abline(intercept=0, slope=1, color=dichromat("#000000")) +
+  scale_y_continuous(limits = c(-7.13,7.13)) +
+  theme_minimal() +
+  xlab("True Effect") + 
+  ylab("MLE") +
+  ggtitle(label = "a)") 
+
+tveApeglm = ggplot(mapping = aes(x = truth, y = map)) + 
+  geom_point(color=dichromat("#E0E0E0")) +
+  geom_point(mapping=aes(x=truth[cond3], y=map[cond3]), color=dichromat("#009E73")) +
+  geom_point(mapping=aes(x=truth[cond2&!cond1], y=map[cond2&!cond1]), color=dichromat("#E69F00")) +
+  geom_abline(intercept=0, slope=1, color="#000000") +
+  scale_y_continuous(limits = c(-7.13,7.13)) +
+  theme_minimal() +
+  xlab("True Effect") + 
+  ylab("apeglm") +
+  ggtitle(label = "b)")
+
+tveAsh = ggplot(mapping = aes(x = truth, y = ashe)) + 
+  geom_point(color=dichromat("#E0E0E0")) +
+  geom_abline(intercept=0, slope=1, color=dichromat("#000000")) +
+  geom_point(mapping=aes(x=truth[cond3], y=ashe[cond3]), color=dichromat("#009E73")) +
+  geom_point(mapping=aes(x=truth[cond2&!cond1], y=ashe[cond2&!cond1]), color=dichromat("#E69F00")) +
+  scale_y_continuous(limits = c(-7.13,7.13)) +
+  theme_minimal() +
+  xlab("True Effect") + 
+  ylab("ash") +
+  ggtitle(label = "c)")
+
+catPlot = plotCatF(truth = truth, mle, map, ashe, mle.filter)$plot +
+  ggtitle(label="d)") + 
+  scale_color_manual(values = dichromat(c("#000000", "#0000FF", "#E69F00", "#FF00FF")))  +
+  scale_shape_manual(values=c(19,19,19,19)) +
+  scale_linetype_manual(values=c(1,1,1,1)) +
+  theme_minimal()
+
+grid.arrange(tveMle, tveApeglm, tveAsh, catPlot)
+fig = arrangeGrob(tveMle, tveApeglm, tveAsh, catPlot) 
+ggsave(device = "eps", filename ="~/Desktop/ResultsLove/PaperPlots/studentTFigureColorblinded.eps", fig) 
+ggsave("~/Desktop/ResultsLove/PaperPlots/studentTFigureColorblinded.png", fig) 
+```
+
+## MA plots for Student T Simulation
+
+```{r MAStudent, echo=F}
+totalCounts = rowSums(cts)
+logCounts = log(totalCounts+1)
+
+MAplot1 = ggplot(mapping=aes(x=logCounts, y=mle)) +
+  geom_point(color="#E0E0E0") + 
+  geom_point(mapping = aes(x=logCounts[shrink>.1&shrinkash>.1], y=mle[shrink>.1&shrinkash>.1], color="Shrunk by Both")) +
+  geom_point(mapping = aes(color="Shrunk by Ash Only", x=logCounts[shrinkash>.1&shrink<=.1], y=mle[shrinkash>.1&shrink<=.1])) +
+  scale_x_continuous(breaks = seq(from=0,to=13,by=2)) +
+  ylab("MLE") +
+  xlab("Log of Summed Counts") +
+  scale_color_manual(name="Colors", values = c(`Shrunk by Ash Only`="#E69F00", `Shrunk by Both`="#009E73")) +
+  theme_minimal() +
+  ggtitle(label = "a)")
+
+cond1 = shrink>pmax(1,mle/4) 
+cond2 = shrinkash>pmax(1,mle/4) 
+cond3 = cond1 & cond2
+MAplot2 = ggplot(mapping=aes(x=logCounts, y=mle)) +
+  geom_point(color="#E0E0E0") + 
+  geom_point(mapping = aes(x=logCounts[cond3], y=mle[cond3], color="Severely Shrunk by Both")) +
+  geom_point(mapping = aes(color="Severely Shrunk by Ash Only", x=logCounts[cond2&!cond1], y=mle[cond2&!cond1])) +
+  scale_x_continuous(breaks = seq(from=0,to=13,by=2)) +
+  ylab("MLE") +
+  xlab("Log of Summed Counts") +
+  scale_color_manual(name="Colors", values = c(`Severely Shrunk by Ash Only`="#E69F00", `Severely Shrunk by Both`="#009E73")) +
+  theme_minimal() +
+  ggtitle(label = "b)") 
+
+MAplots = cowplot::plot_grid(MAplot1, MAplot2, align = "hv", ncol=1) + 
+  ggsave(device = "eps", filename ="~/Desktop/ResultsLove/PaperPlots/MAplotsStudentT.eps", width = 10, height = 4.5) +
+  ggsave("~/Desktop/ResultsLove/PaperPlots/MAplotsStudentT.png")
+plot(MAplots)
+```
+
+
+
+## Range of likelihood function for student's t
+```{r likStudent, echo=F}
+seedd = 2395
+sub = c(2,3,5,6,14,15,20,21)
+beta = rt(nrow(p$counts), df=3)/10
+disp1 = 1+rexp(nrow(p$counts), 1/89) #empirical parameter would be 1/179
+mixProp = 0.5                        #empirical parameter would be 0.3
+phi = vector("double", nrow(p$counts))
+for (i in 1:length(phi)) phi[i] = sample(c(disp1[i], 500), prob = c(mixProp, 1-mixProp), size = 1) 
+set.seed(seedd)
+counts = p$counts[,sub]
+counts = as.matrix(counts)
+rownames(counts) <- seq(length=nrow(counts)) #reseting row names 
+x = rep(c(0,1),length(sub)/2)
+logit = matrix(nrow = length(alleleProbs), ncol = length(sub))
+for (i in 1:length(alleleProbs)) logit[i,] = alleleProbs[i] + beta[i]*x 
+probs = 1/(1+exp(-logit))
+simulatedACounts1 = rbetabinom(n = prod(dim(counts)), 
+                               prob = t(probs), 
+                               size = t(counts), 
+                               theta = rep(phi, each=length(sub)))
+simulatedACounts1 = matrix(simulatedACounts1, nrow=nrow(counts), byrow=T)
+
+cts = counts
+ase.cts = simulatedACounts1
+X=matrix(c(rep(1,ncol(cts)), x), ncol=2)
+theta.hat.0 <- 100 
+param <- cbind(theta.hat.0, cts)
+fit.mle <- apeglm(Y=ase.cts, x=X, log.lik=NULL, param=param, no.shrink=TRUE, log.link=FALSE, method="betabinC")
+cat("minimum and maximum likelihood for initial MLE\n")
+c(min(fit.mle$diag[,3]), max(fit.mle$diag[,3]))
+
+theta.hat <- bbEstDisp(success=ase.cts, size=cts, x=X, beta=fit.mle$map, minDisp=1, maxDisp=500)
+param <- cbind(theta.hat, cts)
+fit.mle <- apeglm(Y=ase.cts, x=X, log.lik=NULL, param=param, no.shrink=TRUE, log.link=FALSE, method="betabinC")
+theta.hat <- bbEstDisp(success=ase.cts, size=cts, x=X, beta=fit.mle$map, minDisp=1, maxDisp=500)
+param <- cbind(theta.hat, cts)
+fit.mle <- apeglm(Y=ase.cts, x=X, log.lik=NULL, param=param, no.shrink=TRUE, log.link=FALSE, method="betabinC")
+cat("minimum and maximum likelihood for final MLE (overdispersion estimated twice)\n")
+c(min(fit.mle$diag[,3]), max(fit.mle$diag[,3]))
+
+fit.mle <- apeglm(Y=ase.cts, x=X, log.lik=NULL, param=param, no.shrink=TRUE, log.link=FALSE, method="betabinCR")
+mle <- cbind(fit.mle$map[,2], fit.mle$sd[,2])
+fit.map <- apeglm(Y=ase.cts, x=X, log.lik=NULL, param=param, coef=2, mle=mle, log.link=FALSE, method = "betabinC")
+cat("minimum and maximum likelihood for MAP \n")
+c(min(fit.map$diag[,3]), max(fit.map$diag[,3]))
+```
+
+

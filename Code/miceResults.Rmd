@@ -1,7 +1,6 @@
 ---
-title: "PaerPlots22"
-author: "Josh Zitovsky"
-date: "6/27/2019"
+title: "Mice Data Analysis"
+author: "Joshua Zitovsky and Michael Love"
 output: html_document
 ---
 
@@ -17,8 +16,6 @@ knitr::opts_chunk$set(fig.width=10, fig.height=4.5)
 goodSamples = function(x) {
   return(sum(x>=10))
 }
-
-
 
 
 #function to get AS reads from inputted cross pair
@@ -57,7 +54,7 @@ processCts = function(groupInp , data2, groupInp2) { #groupInp is the first cros
 
 
 #function that computes MLE and MAP estimates from the data processed above 
-tooLazyToComeUpWithAGoodTitleForFunction = function(p) {
+getEstimates = function(p) {
   cts=p$counts                           
   ase.cts=p$allelecounts
   cts$total=cts$ensembl_id=NULL
@@ -96,7 +93,7 @@ median(l$map$sd))
 
 
 
-#repeating the same thing as above, except this time removing genes with sample allelic proportions of 0 and 1
+#repeating the same thing as processCts, except this time removing genes with sample allelic proportions of 0 and 1
 processCts2 = function(groupInp, data2, groupInp2) {
 data3 = data2 %>%
   filter(group==groupInp | group==groupInp2) %>%
@@ -128,8 +125,8 @@ sampleProbs = ase.cts2$total/cts2$total
 return(list(probs=sampleProbs, counts=cts2, allelecounts=ase.cts2))
 }
 
-#function that's gonna do stuff that I want
-doStuffThatIWant = function(sub) {
+#function that calculates estimates from subset and its accuracy based on held-out set estimates 
+subsetCalculations = function(sub) {
 #getting MLE from leftover population
   cts=p$counts[,-sub]                           
   ase.cts=p$allelecounts[,-sub]
@@ -152,7 +149,7 @@ doStuffThatIWant = function(sub) {
 pSub = p
 pSub$counts = p$counts[,sub]
 pSub$allelecounts = p$allelecounts[,sub]
-subres = tooLazyToComeUpWithAGoodTitleForFunction(pSub) 
+subres = getEstimates(pSub) 
 
 #getting ashe from subset
 cts = as.matrix(pSub$counts)
@@ -256,7 +253,6 @@ plot(mat[,1] ~ mat[,2],
      xlab=desc, 
      ylab="average MLE concordance")
 lines(x=mat[,2], y=mat[,1])
-#best at 120
 }
 ```
 
@@ -269,7 +265,7 @@ library(emdbook)
 library(ashr)
 library(dichromat)
 library(gridExtra)
-data = read_csv("~/Downloads/fullGeccoRnaDump.csv")
+data = read_csv("~/fullGeccoRnaDump.csv")
 
 #counting total allele-specific (AS) reads, turning relevant columns numeric
 data2 = data %>%
@@ -332,7 +328,6 @@ motherStrainF = ifelse(parentSexes=="FH",1,0)
   significantParent = abs(fit.mle$map[,3])-1.645*fit.mle$sd[,3]>0
   significantInteract = abs(fit.mle$map[,4])-1.645*fit.mle$sd[,4]>0
   removeGene = ifelse(significantSex+significantParent+significantInteract>0,1,0)
-#214 genes removed from addition of interation, 2458 genes removed total
 
 p$counts=p$counts[!removeGene,]
 p$allelecounts=p$allelecounts[!removeGene,]
@@ -341,7 +336,7 @@ p$allelecounts=p$allelecounts[!removeGene,]
 
 # 100 Random Sample Runs from Mouse Data
 
-Unlike in the simulations, everything looks almost exactly the same as when lower tolerance was used. However, recall that the holdover MLE is being taken as the truth, and thus MLE biases that effect the estimates will affect the "truth" in the same way. 
+Recall that the holdover MLE is being taken as the truth, and thus MLE biases that effect the estimates will affect the "truth" in the same way. 
 
 ## Summary Statistics
 
@@ -356,14 +351,16 @@ subsets = allSubsets[subsetIndexes,]                         #100 random rows fr
 
 
 #for each sample, calculating estimate and se for MLE, apeglm and ash
-#   results = list()
-#  for (i in 1:100) {
-#      print(i)
-#      results[[i]] = doStuffThatIWant(subsets[i,])
-#    }
-# saveRDS(results, "~/Desktop/crossValResultsSeed2395-size5.rds")
-results = readRDS("~/Desktop/crossValResultsSeed2395-size5.rds")
+  results = list()
+ for (i in 1:100) {
+     print(i)
+     results[[i]] = subsetCalculations(subsets[i,])
+   }
+# saveRDS(results, "~/crossValResultsSeed2395-size5.rds")
+# results = readRDS("~/Desktop/crossValResultsSeed2395-size5.rds")
 ```
+
+
 
 ```{r summarySubsamples, echo=F}
 #caluclating MAE, improvement, for each sample
@@ -411,27 +408,27 @@ mleD=matrix(rep(0, 100*length(results[[1]]$mle)), nrow=length(results[[1]]$mle),
 mapD=matrix(rep(0, 100*length(results[[1]]$mle)), nrow=length(results[[1]]$mle), ncol=100)
 ashD=matrix(rep(0, 100*length(results[[1]]$mle)), nrow=length(results[[1]]$mle), ncol=100)
 
-# CIashexact = list()
-# for (i in 1:100) {
-#   result = results[[i]]
-#   truth = result$goal
-#   confint = ashci(result$ashresults)
-#   CIashexact[[i]] = confint
-#   cat("\n ITERATION COMPLETED\n")
-#   print(i)
-#   cat("\n\n\n\n\n")
-# }
-# saveRDS(CIashexact, "~/Desktop/CIashexact.rds")
-#CIashexact = readRDS("~/Desktop/CIashexact.rds")
+CIashexact = list()
+for (i in 1:100) {
+  result = results[[i]]
+  truth = result$goal
+  confint = ashci(result$ashresults)
+  CIashexact[[i]] = confint
+  cat("\n ITERATION COMPLETED\n")
+  print(i)
+  cat("\n\n\n\n\n")
+}
+# saveRDS(CIashexact, "~/CIashexact.rds")
+# CIashexact = readRDS("~/Desktop/CIashexact.rds")
 
-# CPashexact = vector("double", 100)
-# Widthashexact = vector("double", 100)
-# for (i in 1:100) {
-#   result = results[[i]]
-#   truth = result$goal
-#   CPashexact[i] = mean(truth>=CIashexact[[i]][,1] & truth<=CIashexact[[i]][,2])
-#   Widthashexact[i] = mean(CIashexact[[i]][,2]-CIashexact[[i]][,1])
-# }
+CPashexact = vector("double", 100)
+Widthashexact = vector("double", 100)
+for (i in 1:100) {
+  result = results[[i]]
+  truth = result$goal
+  CPashexact[i] = mean(truth>=CIashexact[[i]][,1] & truth<=CIashexact[[i]][,2])
+  Widthashexact[i] = mean(CIashexact[[i]][,2]-CIashexact[[i]][,1])
+}
     
 for (i in 1:100) {
   result = results[[i]]
@@ -548,12 +545,12 @@ cat("coverage probabilities for MLE, MAP, ash (in that order) across sample runs
 summary(CPmle)
 summary(CPmap)
 summary(CPash)
-#summary(CPashexact)
+summary(CPashexact)
 cat("summary statistics mean standard error for MLE, MAP, ash (in that order) across sample runs \n")
 summary(SEmle)
 summary(SEmap)
 summary(SEash)
-#summary(Widthashexact)
+summary(Widthashexact)
 cat("quantiles of average shrinkage scores for apeglm (top) and ash (bottom)")
 shrink = rowMeans(abs(mleD-mapD))
 shrinkash = rowMeans(abs(mleD-ashD))
@@ -570,11 +567,11 @@ sub = c(2,9,20)
 pLeft=p
 pLeft$counts = p$counts[,-sub]
 pLeft$allelecounts = p$allelecounts[,-sub]
-gold = tooLazyToComeUpWithAGoodTitleForFunction(pLeft)
+gold = getEstimates(pLeft)
 pSub = p
 pSub$counts = p$counts[,sub]
 pSub$allelecounts = p$allelecounts[,sub]
-subres = tooLazyToComeUpWithAGoodTitleForFunction(pSub) 
+subres = getEstimates(pSub) 
 
 
 cts = as.matrix(pSub$counts)
@@ -597,8 +594,8 @@ shrinkash = abs(mle-ashe)
 shrunk = shrink>.1
 shrunkash = shrinkash>.1
 
-#write.csv(map, "~/Desktop/caseMAP.csv")
-#write.csv(subres$map$sd, "~/Desktop/caseMAPSD.csv")
+#write.csv(map, "~/caseMAP.csv")
+#write.csv(subres$map$sd, "~/caseMAPSD.csv")
 ```
 
 ## attempting to shrink
@@ -727,11 +724,12 @@ MAplot2 = ggplot(mapping=aes(x=logCounts, y=mle)) +
 
 
 MAplots = cowplot::plot_grid(MAplot1, MAplot2, align = "hv", ncol=1) +
-  ggsave("~/Desktop/ResultsLove/PaperPlots/MAplotsReal.png")
+  ggsave("~/MAplotsReal.png") +
+  ggsave(device = "eps", filename ="~/MAplotsReal.eps") 
 plot(MAplots)
 ```
 
-# How our MA Plot Looks to the Color-Blinded 
+## How our MA Plot Looks to the Color-Blinded 
 I used the `dichromat` package to simulate how our plot would look for those who suffer from deutreranopia. the most common color-blindness. The plot would look similar for those with protanopia. 
 
 ```{r colorblindMACase, echo=F}
@@ -770,12 +768,13 @@ MAplot2 = ggplot(mapping=aes(x=logCounts, y=mle)) +
 
 
 MAplots = cowplot::plot_grid(MAplot1, MAplot2, align = "hv", ncol=1) +
-  ggsave("~/Desktop/ResultsLove/PaperPlots/MAplotsRealColorblinded.png")
+  ggsave("~/MAplotsRealColorblinded.png") +
+  ggsave(device = "eps", filename ="~/MAplotsRealColorblinded.eps") 
 plot(MAplots)
 ```
 
 
-```{r realFig, echo=F}
+```{r realFig1, echo=F}
 i=52
 print(i)
 result = results[[i]]
@@ -847,14 +846,15 @@ catPlot = ggplot(data=conc, mapping = aes(x=genes, y=concordance, color=Estimate
 #3,99, 94
 grid.arrange(tveMle, tveApeglm, tveAsh, catPlot)
 fig = arrangeGrob(tveMle, tveApeglm, tveAsh, catPlot)
-ggsave("~/Desktop/ResultsLove/PaperPlots/realFigure5.png", fig)
+ggsave("~/realFigure5.png", fig)
+ggsave(device = "eps", filename ="~/realFigure5.eps", plot = fig)
 ```
 
 
-# Main Figure for Mouse Dataset
+## Main Figure for Mouse Dataset
 
 The CAT plot in the corner is averaged across sample runs. The other three plots is for one specific sample run. 
-```{r realFig, echo=F}
+```{r realFig2, echo=F}
 i=52
 print(i)
 result = results[[i]]
@@ -925,77 +925,15 @@ catPlot = ggplot(data=conc, mapping = aes(x=genes, y=concordance, color=Estimate
 
 #3,99, 94
 grid.arrange(tveMle, tveApeglm, tveAsh, catPlot)
-#fig = arrangeGrob(tveMle, tveApeglm, tveAsh, catPlot)
-#ggsave("~/Desktop/ResultsLove/PaperPlots/realFigure.png", fig)
-```
-
-```{r}
-cond1 = shrink>pmax(.25,mle/4)
-cond2 = shrinkash>pmax(.25,mle/4)
-cond3 = (cond1 & cond2) | (cond1&!cond2)
-tveMle = ggplot(mapping = aes(x = truth, y = mle)) + 
-  geom_point(color="dark gray") +
-  geom_point(mapping=aes(x=truth[cond2&!cond1], y=mle[cond2&!cond1]), color="#D55E00") +
-  geom_point(mapping=aes(x=truth[cond3], y=mle[cond3]), color="yellow") +
-  geom_abline(intercept=0, slope=1, color="black") +
-  scale_y_continuous(limits = c(-4,4)) +
-  scale_x_continuous(limits = c(-2,2)) +
-  theme(panel.background = element_rect(fill = 'light gray')) +
-  xlab("True Effect") + 
-  ylab("MLE") +
-  ggtitle(label = "a)") 
-
-tveApeglm = ggplot(mapping = aes(x = truth, y = map)) + 
-  geom_point(color="dark gray") +
-  geom_point(mapping=aes(x=truth[cond2&!cond1], y=mle[cond2&!cond1]), color="#D55E00") +
-  geom_point(mapping=aes(x=truth[cond3], y=map[cond3]), color="yellow") +
-  geom_abline(intercept=0, slope=1, color="black") +
-  scale_y_continuous(limits = c(-4,4)) +
-  scale_x_continuous(limits = c(-2,2)) +
-  theme(panel.background = element_rect(fill = 'light gray')) +
-  xlab("True Effect") + 
-  ylab("apeglm") +
-  ggtitle(label = "b)")
-
-tveAsh = ggplot(mapping = aes(x = truth, y = ashe)) + 
-  geom_point(color="dark gray") +
-  geom_abline(intercept=0, slope=1, color="black") +
-  geom_point(mapping=aes(x=truth[cond2&!cond1], y=ashe[cond2&!cond1]), color="#D55E00") +
-  geom_point(mapping=aes(x=truth[cond3], y=ashe[cond3]), color="yellow") +
-  scale_y_continuous(limits = c(-4,4)) +
-  scale_x_continuous(limits = c(-2,2)) +
-  theme(panel.background = element_rect(fill = 'light gray')) +
-  xlab("True Effect") + 
-  ylab("ash") +
-  ggtitle(label = "c)")
-
-mleConc = c(mean(top50mle), mean(top100mle), mean(top200mle), mean(top300mle), mean(top400mle), mean(top500mle))
-mapConc = c(mean(top50map), mean(top100map), mean(top200map), mean(top300map), mean(top400map), mean(top500map))
-ashConc = c(mean(top50ash), mean(top100ash), mean(top200ash), mean(top300ash), mean(top400ash), mean(top500ash))
-conc = data.frame(concordance = c(mapConc, ashConc, mleConc), genes = rep(c(50,100,200,300,400,500), 3), Estimate = c(rep("apeglm", 6), rep("ash", 6), rep("mle", 6)))
-conc$Estimate <- factor(conc$Estimate, levels = c("mle", "apeglm", "ash"))
-
-catPlot = ggplot(data=conc, mapping = aes(x=genes, y=concordance, color=Estimate, shape=Estimate, linetype=Estimate)) +
-  geom_point() +
-  geom_line() +
-  scale_color_manual(values = c("#000000", "#0000FF", "#D55E00")) +
-  scale_shape_manual(values=c(19,19,19)) +
-  scale_linetype_manual(values=c(1,1,1)) +
-  theme(panel.background = element_rect(fill = 'light gray')) +
-  xlab("Number of Top Genes") +
-  ylab("Concordance") +
-  ggtitle(label = "d)")
-
-
-#3,99, 94
-grid.arrange(tveMle, tveApeglm, tveAsh, catPlot)
 fig = arrangeGrob(tveMle, tveApeglm, tveAsh, catPlot)
-ggsave("~/Desktop/ResultsLove/PaperPlots/realFigure.png", fig)
+ggsave("~/realFigure.png", fig)
+ggsave(device = "eps", "~/realFigure.eps", fig)
 ```
 
 
 
-# How our Figure Looks to the Color-Blinded
+
+## How our Figure Looks to the Color-Blinded
 
 ```{r colorblindRealFig, echo=F}
 tveMle = ggplot(mapping = aes(x = truth, y = mle)) + 
@@ -1051,7 +989,8 @@ catPlot = ggplot(data=conc, mapping = aes(x=genes, y=concordance, color=Estimate
 
 grid.arrange(tveMle, tveApeglm, tveAsh, catPlot)
 fig = arrangeGrob(tveMle, tveApeglm, tveAsh, catPlot)
-ggsave("~/Desktop/ResultsLove/PaperPlots/realFigureColorblinded.png", fig)
+ggsave("~/realFigureColorblinded.png", fig)
+ggsave(device = "eps", filename ="~/realFigureColorblinded.eps", plot=fig)
 ```
 
 ## Holdover Effects and Total Counts in our Case Study
@@ -1061,12 +1000,12 @@ topGenes = data.frame(absGoal = round(abs(goal), 2), totalCounts = totalCounts) 
   arrange(desc(absGoal)) %>%
   head(50)
 topGenes
-#write.csv(topGenes, "~/Desktop/topGenes.csv")
+#write.csv(topGenes, "~/topGenes.csv")
 cat("quantiles of total counts\n")
 quantile(totalCounts)
 ```
 
-## Likelihood function range for case study
+## Likelihood function range for case study (computational diagnostic)
 ```{r likCase, echo=F}
 set.seed(2395)
 sub = subsets[2,]

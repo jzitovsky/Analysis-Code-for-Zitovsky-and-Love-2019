@@ -1,7 +1,6 @@
 ---
-title: "New SimulationFigures"
-author: "Josh Zitovsky"
-date: "2/8/2019"
+title: "Simulation Analysis (for Estimation Accuracy)"
+author: "Joshua Zitovsky and Michael Love"
 output: html_document
 ---
 
@@ -23,7 +22,7 @@ rbetabinom = emdbook::rbetabinom
 dbetabinom = emdbook::dbetabinom
 
 
-data = read_csv("~/Downloads/fullGeccoRnaDump.csv")
+data = read_csv("~/fullGeccoRnaDump.csv")
 dim(data)
 
 #counting total allele-specific (AS) reads, turning relevant columns numeric
@@ -63,7 +62,6 @@ ase.cts$total = rowSums(ase.cts[,-1])
 #sample probabilities
 sampleProbs = ase.cts$total/cts$total
 summary(sampleProbs)
-#gene 11834, ENSMUSG00000064377, is the only gene with 0 expression, with 106 out of 106 from father. We will cap estimated probability at the second empirical lowest (with >1000 counts), 0.0007 (1 out of 1429). Median AS counts is 15547, 1st quartile is 3769. 
 ```
 
 
@@ -105,7 +103,7 @@ processCts = function(groupInp , data2, groupInp2) { #groupInp is the first cros
 
 
 #function that computes MLE and MAP estimates from the data processed above 
-tooLazyToComeUpWithAGoodTitleForFunction = function(p, maxDispersion=500) {
+getEstimates = function(p, maxDispersion=500) {
   cts=p$counts                           
   ase.cts=p$allelecounts
   cts$total=cts$ensembl_id=NULL
@@ -132,7 +130,7 @@ tooLazyToComeUpWithAGoodTitleForFunction = function(p, maxDispersion=500) {
 
 
 
-#repeating the same thing as above, except this time removing genes with sample allelic proportions of 0 and 1
+#processing data and removing genes with sample allelic proportions of 0 and 1
 processCts2 = function(groupInp, data2, groupInp2) {
 data3 = data2 %>%
   filter(group==groupInp | group==groupInp2) %>%
@@ -214,10 +212,9 @@ fit.mle <- apeglm(Y=ase.cts, x=X, log.lik=NULL, param=param, no.shrink=TRUE, log
 theta.hat <- bbEstDisp(success=ase.cts, size=cts, x=X, beta=fit.mle$map, minDisp=1, maxDisp=500)
 param <- cbind(theta.hat, cts)
 fit.mle <- apeglm(Y=ase.cts, x=X, log.lik=NULL, param=param, no.shrink=TRUE, log.link=FALSE, method="betabinCR")
-#NOTE: took out 'coef=1' for last two
 
 
-#fitting apeglme model
+#fitting apeglm model
 mle <- cbind(fit.mle$map[,2], fit.mle$sd[,2])
 fit.map <- apeglm(Y=ase.cts, x=X, log.lik=NULL, param=param, coef=2, mle=mle, log.link=FALSE, method = "betabinCR")
 
@@ -372,7 +369,7 @@ motherStrainF = ifelse(parentSexes=="FH",1,0)
   p$allelecounts=p$allelecounts[!removeGene,]
   
   alleleProbs = p$allelecounts$total/p$counts$total
-  l = tooLazyToComeUpWithAGoodTitleForFunction(p)
+  l = getEstimates(p)
 ```
 
 # Normal Simulation
@@ -405,9 +402,9 @@ pSub=list(counts=p$counts[,c(1,sub,26)], allelecounts=p$allelecounts[,c(1,sub,26
 ## Summary Statistics for Normal Simulation
 
 ```{r griAshNromal, message=FALSE, results='hide', warning=FALSE, echo=FALSE}
-#CIgrid = ashci(ashresults)
-#saveRDS(object = CIgrid, file = "~/Desktop/CIgridNormal.rds")
-CIgrid = readRDS("~/Desktop/CIgridNormal.rds")
+CIgrid = ashci(ashresults)
+#saveRDS(object = CIgrid, file = "~/CIgridNormal.rds")
+#CIgrid = readRDS("~/CIgridNormal.rds")
 ```
 
 ```{r summaryNormal, echo=F}
@@ -517,8 +514,8 @@ MAplot2 = ggplot(mapping=aes(x=logCounts, y=mle)) +
   ggtitle(label = "b)") 
 
 MAplots = cowplot::plot_grid(MAplot1, MAplot2, align = "hv", ncol=1) + 
-  ggsave(device = "eps", filename ="~/Desktop/ResultsLove/PaperPlots/MAplotsNormal.eps") +
-  ggsave("~/Desktop/ResultsLove/PaperPlots/MAplotsNormal.png")
+  ggsave(device = "eps", filename ="~/MAplotsNormal.eps") +
+  ggsave("~/MAplotsNormal.png")
 plot(MAplots)
 ```
 
@@ -570,8 +567,8 @@ tveFilter = ggplot(mapping = aes(y=mle[filterRule3], x=truth[filterRule3])) +
   xlab("True Effects after Filtering") +
   ylab("MLE after Filtering") + 
   theme_minimal() +
-  ggsave(device = "eps", filename ="~/Desktop/ResultsLove/PaperPlots/tveAfterFilter.eps", width = 10, height = 4.5) +
-  ggsave("~/Desktop/ResultsLove/PaperPlots/tveAfterFilter.png", width = 10, height = 4.5)
+  ggsave(device = "eps", filename ="~/tveAfterFilter.eps", width = 10, height = 4.5) +
+  ggsave("~/tveAfterFilter.png", width = 10, height = 4.5)
 
 print(tveFilter)
 ```
@@ -654,8 +651,8 @@ catPlot = ggplot(conc, mapping = aes(x=tops, y=concordance, group=estimate)) +
 
 grid.arrange(tveMle, tveApeglm, tveAsh, catPlot)
 fig = arrangeGrob(tveMle, tveApeglm, tveAsh, catPlot) 
-ggsave(device = "eps", filename ="~/Desktop/ResultsLove/PaperPlots/normalFigure.eps", fig)
-ggsave(filename ="~/Desktop/ResultsLove/PaperPlots/normalFigure.png", fig)
+ggsave(device = "eps", filename ="~/normalFigure.eps", fig)
+ggsave(filename ="~/normalFigure.png", fig)
 ```
 
 
@@ -718,8 +715,8 @@ catPlot = plotCatF(truth = truth, mle, map, ashe, mle.filter)$plot +
 
 grid.arrange(tveMle, tveApeglm, tveAsh, catPlot)
 fig = arrangeGrob(tveMle, tveApeglm, tveAsh, catPlot) 
-ggsave(device = "eps", filename ="~/Desktop/ResultsLove/PaperPlots/normalFigureColorblinded.eps", fig)
-ggsave(filename ="~/Desktop/ResultsLove/PaperPlots/normalFigureColorblinded.png", fig)
+ggsave(device = "eps", filename ="~/normalFigureColorblinded.eps", fig)
+ggsave(filename ="~/normalFigureColorblinded.png", fig)
 ```
 
 # Student T Simulation
@@ -752,16 +749,16 @@ improve = abs(truth-mle)-abs(truth-map)
 improveash = abs(truth-mle)-abs(truth-ashe)
 pSub=list(counts=p$counts[,c(1,sub,26)], allelecounts=p$allelecounts[,c(1,sub,26)])
 
-#write.csv(map, "~/Desktop/studentTmap.csv")
-#write.csv(mapsd, "~/Desktop/studentTsd.csv")
+#write.csv(map, "~/studentTmap.csv")
+#write.csv(mapsd, "~/studentTsd.csv")
 ```
 
 ## Summary Statistics for Student T Simulation
 
 ```{r gridAshStudent, message=FALSE, results='hide', warning=FALSE, echo=FALSE}
-#CIgrid = ashci(ashresults)
-#saveRDS(CIgrid, "~/Desktop/CIgridStudent")
-CIgrid = readRDS("~/Desktop/CIgridStudent")
+CIgrid = ashci(ashresults)
+#saveRDS(CIgrid, "~/CIgridStudent")
+#CIgrid = readRDS("~/CIgridStudent")
 ```
 
 ```{r summaryStudent, echo=F}
@@ -840,8 +837,8 @@ ggplot(mapping=aes(x=l$theta)) +
   ylab("Density") +
   xlab("Overdispersion Parameter") +
   theme_minimal() +
-  ggsave(device = "eps", filename ="~/Desktop/ResultsLove/PaperPlots/phi500Dens.eps", width = 10, height = 4.5) +
-  ggsave("~/Desktop/ResultsLove/PaperPlots/phi500Dens.png", width = 10, height = 4.5)
+  ggsave(device = "eps", filename ="~/phi500Dens.eps", width = 10, height = 4.5) +
+  ggsave("~/phi500Dens.png", width = 10, height = 4.5)
 
 
 #histogram of simulated effects
@@ -856,14 +853,14 @@ ggplot(mapping = aes(x=beta)) +
   ylab("Frequency")  +
   coord_trans(y = "log2p") +
   theme_minimal() +
-  ggsave(device = "eps", filename ="~/Desktop/ResultsLove/PaperPlots/simulatedBeta.eps", width = 10, height = 4.5) +
-  ggsave("~/Desktop/ResultsLove/PaperPlots/simulatedBeta.png", width = 10, height = 4.5)
+  ggsave(device = "eps", filename ="~/simulatedBeta.eps", width = 10, height = 4.5) +
+  ggsave("~/simulatedBeta.png", width = 10, height = 4.5)
 ```
 
 
 
 ## Filtering for Student's T Simulation
-Again, the optimal filtering rule is now completely different.
+
 ```{r filterStudent, echo=F}
 #looking at half samples, full samples, or total count filtering
 getFilterRule(sub, beta, 4, load=FALSE, desc="filtering rule: genes with less than this many counts for half the samples removed")
@@ -907,7 +904,6 @@ mle.filter = ifelse(filterRule2, mle, 0)
 
 ## Main Figure for Student's T Simulation
 
-The truth vs. estimate plots look different. We can see here that ash shrunk the gene that was truly largest to zero. In the previous analysis, when higher tolerance was used, ash did not shrink any truly large effects away from the trurth. 
 ```{r figStudent, echo=F}
 cond1 = shrink>pmax(1,mle/4) 
 cond2 = shrinkash>pmax(1,mle/4) 
@@ -955,11 +951,11 @@ catPlot = plotCatF(truth = truth, mle, map, ashe, mle.filter)$plot +
 
 grid.arrange(tveMle, tveApeglm, tveAsh, catPlot)
 fig = arrangeGrob(tveMle, tveApeglm, tveAsh, catPlot) 
-ggsave(device = "eps", filename ="~/Desktop/ResultsLove/PaperPlots/studentTFigure.eps", fig) 
-ggsave("~/Desktop/ResultsLove/PaperPlots/studentTFigure.png", fig)
+ggsave(device = "eps", filename ="~/studentTFigure.eps", fig) 
+ggsave("~/studentTFigure.png", fig)
 ```
 
-# How our Figure Looks to the Color-Blinded
+## How our Figure Looks to the Color-Blinded
 
 ```{r colorblindFigStudent, echo=F}
 cond1 = shrink>pmax(1,mle/4) & abs(shrinkash-shrink)>.1
@@ -1008,8 +1004,8 @@ catPlot = plotCatF(truth = truth, mle, map, ashe, mle.filter)$plot +
 
 grid.arrange(tveMle, tveApeglm, tveAsh, catPlot)
 fig = arrangeGrob(tveMle, tveApeglm, tveAsh, catPlot) 
-ggsave(device = "eps", filename ="~/Desktop/ResultsLove/PaperPlots/studentTFigureColorblinded.eps", fig) 
-ggsave("~/Desktop/ResultsLove/PaperPlots/studentTFigureColorblinded.png", fig) 
+ggsave(device = "eps", filename ="~/studentTFigureColorblinded.eps", fig) 
+ggsave("~/studentTFigureColorblinded.png", fig) 
 ```
 
 ## MA plots for Student T Simulation
@@ -1044,14 +1040,14 @@ MAplot2 = ggplot(mapping=aes(x=logCounts, y=mle)) +
   ggtitle(label = "b)") 
 
 MAplots = cowplot::plot_grid(MAplot1, MAplot2, align = "hv", ncol=1) + 
-  ggsave(device = "eps", filename ="~/Desktop/ResultsLove/PaperPlots/MAplotsStudentT.eps", width = 10, height = 4.5) +
-  ggsave("~/Desktop/ResultsLove/PaperPlots/MAplotsStudentT.png")
+  ggsave(device = "eps", filename ="~/MAplotsStudentT.eps", width = 10, height = 4.5) +
+  ggsave("~/MAplotsStudentT.png")
 plot(MAplots)
 ```
 
 
 
-## Range of likelihood function for student's t
+## Range of likelihood function for student's t (computational diagnostic)
 ```{r likStudent, echo=F}
 seedd = 2395
 sub = c(2,3,5,6,14,15,20,21)
